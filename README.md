@@ -210,7 +210,7 @@ tabs on the right. Work through the tabs in order.
    **Capture Frame** each time, then **Compute Intrinsics**. An RMS below ~0.5-1 px is good.
    You can skip this for a quick trial; PoseBoard then assumes a 60° horizontal field of
    view without lens distortion (less accurate).
-3. **Extrinsics / world frame**: lay the (floor) checkerboard flat on the floor next to the
+3. **Extrinsics / World Frame**: lay the (floor) checkerboard flat on the floor next to the
    balance board, fully visible in **all** cameras at once, and click **Set All Camera
    Extrinsics from Checkerboard**. The panel lists the reprojection error and each camera's
    position in meters; camera heights (Z) should be positive and plausible. After this the

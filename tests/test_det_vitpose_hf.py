@@ -386,6 +386,12 @@ def test_flip_test_runs_the_mirrored_crop_and_keeps_left_and_right():
     assert len(calls) == 2
     np.testing.assert_array_equal(calls[1], calls[0][..., ::-1])  # the mirrored crop
     np.testing.assert_allclose(flipped.keypoints, plain.keypoints, atol=0.3)
+    # generic labels (LABEL_0 ...): the mirror pairs come from the COCO-17 names
+    generic = vd.VitPoseHFDetector.from_components(
+        model, persons, flip_test=True, keypoint_names=[f"LABEL_{i}" for i in range(17)])
+    np.testing.assert_array_equal(generic._flip_perm, vd.flip_permutation(COCO17.names))
+    np.testing.assert_allclose(generic.detect(img, 0.0, "c")[0].keypoints, plain.keypoints,
+                               atol=0.3)
     assert plain.keypoints[COCO17.index("left_shoulder"), 0] > 240  # image right
     assert plain.keypoints[COCO17.index("right_shoulder"), 0] < 160
 
@@ -654,6 +660,9 @@ def test_missing_weights_raise_a_clear_error(hf, tmp_path):
     with pytest.raises(vd.WeightsUnavailable, match="person detector"):
         vd.RTDetrPersonDetector("no-such-org/no-such-detr", "cpu", local_files_only=True,
                                 cache_dir=str(tmp_path))
+    with pytest.raises(vd.WeightsUnavailable, match="from the folder") as e:
+        vd.HFVitPoseModel(str(tmp_path / "missing_model"), "cpu")
+    assert "config.json" in str(e.value)
 
 
 def test_person_label_ids():

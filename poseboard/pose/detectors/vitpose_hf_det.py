@@ -533,8 +533,19 @@ def _is_download_error(e: BaseException) -> bool:
     return root in ("huggingface_hub", "requests", "httpx", "httpcore", "urllib3")
 
 
+def _looks_like_path(name: str) -> bool:
+    p = Path(name).expanduser()
+    return (p.is_absolute() or name.startswith((".", "~")) or "\\" in name
+            or name.count("/") > 1 or p.exists())
+
+
 def _unavailable(what: str, repo: str, e: BaseException, cache_dir) -> WeightsUnavailable:
     first = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
+    if _looks_like_path(repo):
+        return WeightsUnavailable(
+            f"Cannot load the {what} from the folder {repo!r} ({type(e).__name__}: {first}). "
+            "The folder must hold a transformers model saved with save_pretrained "
+            "(config.json and the weights), e.g. a copy of the Hugging Face model folder.")
     where = f"{cache_dir}" if cache_dir else "the Hugging Face cache (~/.cache/huggingface/hub)"
     return WeightsUnavailable(
         f"Cannot load the {what} {repo!r} ({type(e).__name__}: {first}).\n"
@@ -542,6 +553,18 @@ def _unavailable(what: str, repo: str, e: BaseException, cache_dir) -> WeightsUn
         f"huggingface.co, download the model folder on another computer (for example with "
         f"`huggingface-cli download {repo} --local-dir <folder>`) and give that folder as the "
         f"model option, or set HF_ENDPOINT to a Hugging Face mirror.")
+
+
+def _no_image_backend(what: str, e: ImportError) -> RuntimeError:
+    return RuntimeError(f"The {what} image processor of transformers needs torchvision (or "
+                        f"Pillow): pip install torchvision ({e})")
+
+
+def _as_bool(v) -> bool:
+    """Option value -> bool ("false", "0", "no", "off" and "" are False)."""
+    if isinstance(v, str):
+        return v.strip().lower() not in ("", "0", "false", "no", "off", "none")
+    return bool(v)
 
 
 def _pair(v) -> tuple[int, int]:
@@ -559,7 +582,12 @@ class HFVitPoseModel:
                  dataset_index: int | None = None, cache_dir: str | None = None,
                  local_files_only: bool = False):
         import torch
-        from transformers import VitPoseForPoseEstimation
+
+        try:
+            from transformers import VitPoseForPoseEstimation
+        except ImportError as e:  # transformers < 4.48
+            raise RuntimeError("ViTPose needs transformers >= 4.48: pip install -U transformers "
+                               f"({e})") from e
 
         self.model_id = str(model)
         self.device = device
@@ -636,7 +664,7 @@ def person_label_ids(id2label: dict | None) -> list[int]:
 class RTDetrPersonDetector:
     """transformers object detector (default RT-DETR R50, COCO + Objects365): ``__call__``
     maps an RGB image to (boxes (N, 4) x1, y1, x2, y2 in its pixels, scores (N,)) of the
-    persons with a score >= ``threshold``.
+    persons with a score > ``threshold``.
 
     ``post_process_object_detection`` with ``target_sizes=[(height, width)]`` scales the
     relative (cx, cy, w, h) boxes to absolute x1, y1, x2, y2 of the original image
@@ -655,6 +683,8 @@ class RTDetrPersonDetector:
         try:
             self.processor = AutoImageProcessor.from_pretrained(self.model_id, **kw)
             net = AutoModelForObjectDetection.from_pretrained(self.model_id, **kw)
+        except ImportError as e:
+            raise _no_image_backend("person detector", e) from e
         except Exception as e:
             if _is_download_error(e):
                 raise _unavailable("person detector", self.model_id, e, cache_dir) from e
@@ -779,6 +809,7 @@ class VitPoseHFDetector(Detector2D):
                  batch_size: int = 8, cache_dir: str | None = None,
                  weights_dir: str | None = None, local_files_only: bool = False):
         super().__init__()
+        flip_test, local_files_only = _as_bool(flip_test), _as_bool(local_files_only)
         pd = str(person_detector or "rtdetr").strip().lower()
         if pd not in PERSON_DETECTORS:
             raise ValueError(f"person_detector must be one of {', '.join(PERSON_DETECTORS)}, "
@@ -852,8 +883,14 @@ class VitPoseHFDetector(Detector2D):
                                                       keypoint_format)
         self.input_size = _pair(input_size)
         self.mean, self.std, self.rescale = tuple(mean), tuple(std), float(rescale)
-        self.flip_test = bool(flip_test)
-        self._flip_perm = flip_permutation(self.keypoint_names_model) if flip_test else None
+        self.flip_test = _as_bool(flip_test)
+        self._flip_perm = None
+        if self.flip_test:  # mirror pairs from the format names (the model's labels may be generic)
+            resolved = list(self.keypoint_names_model)
+            for i, ch in enumerate(self._index_map):
+                if ch >= 0:
+                    resolved[ch] = self.format.names[i]
+            self._flip_perm = flip_permutation(resolved)
         self.batch_size = max(1, int(batch_size))
         self.max_people = max(1, int(max_people))
 

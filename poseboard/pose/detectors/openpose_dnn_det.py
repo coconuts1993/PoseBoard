@@ -393,7 +393,8 @@ def _blob(buf) -> np.ndarray:
         elif num in (1, 2, 3, 4) and wt == 0:
             legacy[num] = val
     parts = data or ddata
-    arr = (np.concatenate(parts) if parts else np.zeros(0)).astype(np.float32)
+    arr = parts[0] if len(parts) == 1 else (np.concatenate(parts) if parts else np.zeros(0))
+    arr = arr.astype(np.float32, copy=False)  # a view of the file data for float blobs
     if dims is None:
         dims = [legacy.get(i, 1) for i in (1, 2, 3, 4)]
     if int(np.prod(dims)) != arr.size:
@@ -471,12 +472,14 @@ def _node(op: str, inputs: list[str], outputs: list[str], name: str, **attrs) ->
     return _pb_bytes(1, body)  # GraphProto.node = 1
 
 
-def _initializer(name: str, arr: np.ndarray) -> bytes:
-    # TensorProto: dims=1, data_type=2 (FLOAT=1), name=8, raw_data=9 (little endian)
+def _initializer(name: str, arr: np.ndarray) -> list:
+    """GraphProto.initializer (field 5) as a list of chunks; the tensor data is not copied
+    here (TensorProto: dims=1, data_type=2 (FLOAT=1), name=8, raw_data=9, little endian)."""
     a = np.ascontiguousarray(arr, dtype="<f4")
-    body = (b"".join(_pb_int(1, d) for d in a.shape) + _pb_int(2, 1) + _pb_str(8, name)
-            + _pb_bytes(9, a.tobytes()))
-    return _pb_bytes(5, body)  # GraphProto.initializer = 5
+    data = memoryview(a).cast("B")
+    head = (b"".join(_pb_int(1, d) for d in a.shape) + _pb_int(2, 1) + _pb_str(8, name)
+            + _enc_varint((9 << 3) | 2) + _enc_varint(len(data)))
+    return [_enc_varint((5 << 3) | 2) + _enc_varint(len(head) + len(data)), head, data]
 
 
 def _value_info(num: int, name: str, dims: list) -> bytes:
@@ -492,7 +495,7 @@ def _value_info(num: int, name: str, dims: list) -> bytes:
 @dataclass
 class _Graph:
     nodes: list[bytes] = field(default_factory=list)
-    inits: list[bytes] = field(default_factory=list)
+    inits: list = field(default_factory=list)  # chunks (bytes / memoryview)
     names: dict[str, str] = field(default_factory=dict)  # Caffe blob -> current ONNX tensor
     count: int = 0
 
@@ -635,11 +638,11 @@ def caffe_to_onnx(prototxt_text: str, weights: dict[str, list[np.ndarray]],
                                  f"{n_out} and kernel {kh}x{kw} (caffemodel and prototxt of "
                                  "different models?)")
             wn = f"{lname}__W"
-            g.inits.append(_initializer(wn, w))
+            g.inits.extend(_initializer(wn, w))
             conv_in = [ins[0], wn]
             if bias and len(blobs) > 1:
                 bn = f"{lname}__B"
-                g.inits.append(_initializer(bn, blobs[1].reshape(-1)))
+                g.inits.extend(_initializer(bn, blobs[1].reshape(-1)))
                 conv_in.append(bn)
             g.nodes.append(_node("Conv", conv_in, [out], lname, kernel_shape=[kh, kw],
                                  strides=[sh, sw], pads=[ph, pw, ph, pw],
@@ -656,7 +659,7 @@ def caffe_to_onnx(prototxt_text: str, weights: dict[str, list[np.ndarray]],
             shared = _flag(_first(_first(lay, "prelu_param", {}), "channel_shared", "false"))
             s = blobs[0].reshape(-1)
             sn = f"{lname}__slope"
-            g.inits.append(_initializer(sn, s.reshape(1) if shared else s.reshape(-1, 1, 1)))
+            g.inits.extend(_initializer(sn, s.reshape(1) if shared else s.reshape(-1, 1, 1)))
             g.nodes.append(_node("PRelu", [ins[0], sn], [out], lname))
         elif typ == "Pooling":
             p = _first(lay, "pooling_param", {})
@@ -703,12 +706,15 @@ def caffe_to_onnx(prototxt_text: str, weights: dict[str, list[np.ndarray]],
     for b in outputs:
         g.nodes.append(_node("Identity", [g.names[b]], [b], f"{b}__output"))
         graph_outputs.append(_value_info(12, b, [1, "channels", "out_height", "out_width"]))
-    # GraphProto: node=1, name=2, initializer=5, input=11, output=12
-    graph = (b"".join(g.nodes) + _pb_str(2, str(_first(net, "name", "caffe_net")))
-             + b"".join(g.inits) + b"".join(graph_inputs) + b"".join(graph_outputs))
+    # GraphProto: node=1, name=2, initializer=5, input=11, output=12. Assembled from chunks
+    # with a single final join (the weights are copied once).
+    graph = (g.nodes + [_pb_str(2, str(_first(net, "name", "caffe_net")))] + g.inits
+             + graph_inputs + graph_outputs)
+    graph_len = sum(len(c) for c in graph)
     # ModelProto: ir_version=1, producer_name=2, graph=7, opset_import=8 (domain=1, version=2)
-    return (_pb_int(1, 7) + _pb_str(2, "poseboard-caffe2onnx") + _pb_bytes(7, graph)
-            + _pb_bytes(8, _pb_str(1, "") + _pb_int(2, opset)))
+    head = (_pb_int(1, 7) + _pb_str(2, "poseboard-caffe2onnx") + _enc_varint((7 << 3) | 2)
+            + _enc_varint(graph_len))
+    return b"".join([head] + graph + [_pb_bytes(8, _pb_str(1, "") + _pb_int(2, opset))])
 
 
 # ------------------------------------------------------------------ OpenCV network

@@ -1,8 +1,10 @@
-"""姿态估计接口。
+"""Pose estimation interface.
 
-任何 3D 姿态来源（MediaPipe、你已有的 PoseAssess、Pose2Sim 输出……）只要实现
-``PoseEstimator.process`` 并返回世界坐标系下的 ``Pose3D`` 即可接入 PoseBoard。
-世界坐标系 = 棋盘格定义的坐标系（与平衡板定位使用同一套相机外参）。
+Any 3D pose source (MediaPipe, your existing PoseAssess, Pose2Sim output, ...) can be
+plugged into PoseBoard by implementing ``PoseEstimator.process`` and returning a
+``Pose3D`` in world coordinates.
+World frame = the frame defined by the checkerboard (the same camera extrinsics used
+to locate the balance board).
 """
 
 from __future__ import annotations
@@ -16,15 +18,15 @@ from poseboard.calibration import CameraCalibration
 
 @dataclass
 class Pose2D:
-    keypoints: np.ndarray  # (K, 2) 像素
+    keypoints: np.ndarray  # (K, 2) pixels
     scores: np.ndarray  # (K,)
 
 
 @dataclass
 class Pose3D:
-    t: float  # perf_counter 时间戳（多相机时取各帧平均）
+    t: float  # perf_counter timestamp (mean over frames when using multiple cameras)
     names: list[str]
-    keypoints: np.ndarray  # (K, 3) 世界坐标，米；缺失为 NaN
+    keypoints: np.ndarray  # (K, 3) world coordinates, meters; NaN if missing
     scores: np.ndarray  # (K,)
     per_camera_2d: dict[str, Pose2D] = field(default_factory=dict)
 
@@ -37,7 +39,7 @@ class Pose3D:
 
 
 class PoseEstimator:
-    """姿态估计器基类。"""
+    """Base class for pose estimators."""
 
     name = "base"
     keypoint_names: list[str] = []
@@ -45,7 +47,7 @@ class PoseEstimator:
 
     def process(self, frames: dict[str, tuple[float, np.ndarray]],
                 cams: dict[str, CameraCalibration]) -> Pose3D | None:
-        """frames: {相机名: (时间戳, BGR 图像)}；cams: {相机名: 标定}。"""
+        """frames: {camera name: (timestamp, BGR image)}; cams: {camera name: calibration}."""
         raise NotImplementedError
 
     def close(self) -> None:

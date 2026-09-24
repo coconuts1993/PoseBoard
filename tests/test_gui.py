@@ -1,4 +1,5 @@
-"""离屏运行主界面的端到端流程：相机(视频文件) → 棋盘格外参 → 点选平衡板 → 模拟 Wii → 录制。"""
+"""Offscreen end-to-end GUI flow: camera (video file) → checkerboard extrinsics →
+click the balance board → simulated Wii → record."""
 
 import json
 import os
@@ -34,12 +35,12 @@ def test_full_flow(app, tmp_path):
     w = MainWindow()
     w.resize(1400, 850)
     w.show()
-    w.cam_res.setCurrentText("默认")
+    w.cam_res.setCurrentText("Default")
     w.add_camera(str(video))
     pump(app, 0.3)
     assert "cam0" in w.streams
 
-    # 用真值内参（相当于已完成内参标定），再用棋盘格求外参
+    # Use ground-truth intrinsics (as if already calibrated), then solve extrinsics from the checkerboard
     truth = scene_camera()
     from poseboard.calibration import CameraCalibration
     w.calibs["cam0"] = CameraCalibration("cam0", truth.image_size, truth.K.copy(), truth.dist.copy())
@@ -51,19 +52,19 @@ def test_full_flow(app, tmp_path):
     assert cam.has_extrinsics and cam.extrinsic_rms < 1.0
     np.testing.assert_allclose(cam.center_world, truth.center_world, atol=0.02)
 
-    # 点选平衡板 5 点
+    # Click the 5 balance board points
     w.tabs.setCurrentIndex(2)
     w.b_click.setChecked(True)
     for p in truth.project(BOARD_T.apply(BoardGeometry().landmarks())):
         w._on_video_click(float(p[0]), float(p[1]), 1)
-    w._on_video_click(0, 0, 1)  # 第 6 次点击忽略
+    w._on_video_click(0, 0, 1)  # the 6th click is ignored
     assert len(w.clicks["cam0"]) == 5
     w.compute_board()
     assert w.board is not None
     np.testing.assert_allclose(w.board.board_to_world.t, BOARD_T.t, atol=0.02)
     assert w.board.up_world[2] > 0.99
 
-    # 模拟 Wii + 录制
+    # Simulated Wii + recording
     w.connect_sim()
     w.out_dir.setText(str(tmp_path / "rec"))
     w.subject.setText("test")
@@ -80,7 +81,7 @@ def test_full_flow(app, tmp_path):
     summary = json.loads((folders[0] / "summary.json").read_text(encoding="utf-8"))
     assert summary["cop"]["samples"] > 50
 
-    # 保存/加载配置
+    # Save/load config
     proj = tmp_path / "proj.json"
     from unittest import mock
     with mock.patch.object(QtWidgets.QFileDialog, "getSaveFileName", return_value=(str(proj), "")):

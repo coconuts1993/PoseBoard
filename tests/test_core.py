@@ -19,7 +19,7 @@ from poseboard.wii.device import ForceSample, SimulatedBoard
 
 
 def make_cam(name, center, target=(0, 0, 0), size=(1280, 720), f=1000.0):
-    """构造看向 target 的相机（世界 Z 朝上）。"""
+    """Build a camera looking at target (world Z up)."""
     center, target = np.asarray(center, float), np.asarray(target, float)
     z = target - center
     z /= np.linalg.norm(z)
@@ -70,7 +70,7 @@ def test_output_reports():
 def test_cop():
     dx, dy = 0.433, 0.238
     assert P.center_of_pressure([10, 10, 10, 10], dx, dy) == (0, 0)
-    x, y = P.center_of_pressure([20, 0, 0, 0], dx, dy)  # 全部压在 TR
+    x, y = P.center_of_pressure([20, 0, 0, 0], dx, dy)  # all load on TR
     assert x == pytest.approx(dx / 2) and y == pytest.approx(dy / 2)
     x, y = P.center_of_pressure([0, 0, 0, 20], dx, dy)  # BL
     assert x == pytest.approx(-dx / 2) and y == pytest.approx(-dy / 2)
@@ -139,7 +139,7 @@ def test_kabsch():
 def test_checkerboard_extrinsics_z_up():
     spec = CheckerboardSpec(9, 6, 40)
     cam = make_cam("c", [0.5, -1.2, 1.4], [0.16, 0.1, 0])
-    # 渲染一张合成棋盘格图像
+    # Render a synthetic checkerboard image
     sq = 40
     img_board = np.full(((spec.rows + 3) * sq, (spec.cols + 3) * sq), 255, np.uint8)
     for r in range(spec.rows + 1):
@@ -147,7 +147,7 @@ def test_checkerboard_extrinsics_z_up():
             if (r + c) % 2 == 0:
                 y0, x0 = (r + 1) * sq, (c + 1) * sq
                 img_board[y0:y0 + sq, x0:x0 + sq] = 0
-    # 棋盘格像素 -> 世界（米），第一个内角点在 (2sq, 2sq) 像素处
+    # Checkerboard pixels -> world (meters); the first inner corner is at pixel (2sq, 2sq)
     s = spec.square_mm / 1000 / sq
     src = np.array([[0, 0], [img_board.shape[1], 0], [img_board.shape[1], img_board.shape[0]],
                     [0, img_board.shape[0]]], float)
@@ -161,7 +161,7 @@ def test_checkerboard_extrinsics_z_up():
 
 
 def test_checkerboard_world_frame_consistent_across_views():
-    """不同方位（包括对面）的相机必须得到同一个世界坐标系。"""
+    """Cameras at different positions (including opposite sides) must yield the same world frame."""
     from tests.synthetic import SPEC, render_scene
     for center in ([0.6, -0.9, 1.3], [1.6, 1.2, 1.3], [-0.8, 0.9, 1.4], [0.3, 1.5, 1.2]):
         cam = make_cam("x", center, [0.3, 0.15, 0])
@@ -188,7 +188,7 @@ def test_calibration_io_roundtrip(tmp_path):
 
 # -------------------------------------------------------------------- pose
 def standing_skeleton(offset=(0, 0, 0)):
-    """简化的站立骨架（世界坐标，Z 朝上），MediaPipe 命名。"""
+    """Simplified standing skeleton (world coordinates, Z up), MediaPipe naming."""
     p = {n: np.full(3, np.nan) for n in MP_NAMES}
     for side, sx in (("left", 0.1), ("right", -0.1)):
         p[f"{side}_shoulder"] = [sx * 1.8, 0, 1.45]
@@ -208,8 +208,8 @@ def standing_skeleton(offset=(0, 0, 0)):
 def test_com_standing():
     kp = standing_skeleton((0.3, 0.2, 0))
     com = center_of_mass(kp, MP_NAMES)
-    assert com[0] == pytest.approx(0.3, abs=1e-6)  # 左右对称
-    assert 0.85 < com[2] < 1.1  # 约身高 55%
+    assert com[0] == pytest.approx(0.3, abs=1e-6)  # left-right symmetric
+    assert 0.85 < com[2] < 1.1  # about 55% of body height
 
 
 def test_com_other_naming_and_missing():
@@ -229,7 +229,7 @@ def test_triangulate_keypoints_and_single_view():
     X, conf = triangulate_keypoints(cams, p2, sc)
     np.testing.assert_allclose(X, kp, atol=1e-6)
 
-    body = kp - kp[MP_NAMES.index("left_hip")]  # 以髋为原点，任意旋转也可
+    body = kp - kp[MP_NAMES.index("left_hip")]  # hip as origin; any rotation works too
     lifted = single_view_lift(cams[0], Pose2D(p2[0], np.ones(len(kp))), body)
     np.testing.assert_allclose(lifted, kp, atol=1e-4)
 
@@ -239,7 +239,7 @@ def test_fuse_state():
     cam = make_cam("c0", [0.8, -1.5, 1.6], [0.8, 0.5, 0.0])
     board = register_board(geo, [cam], [cam.project(T.apply(geo.landmarks()))])
     force = ForceSample(1.0, np.array([20, 20, 20, 20.0]), 80.0, (0.02, -0.01))
-    kp = T.apply(standing_skeleton())  # 站在板中心
+    kp = T.apply(standing_skeleton())  # standing at the board center
     st = fuse(board, force, Pose3D(1.0, list(MP_NAMES), kp, np.ones(len(kp))))
     np.testing.assert_allclose(st.cop_world, T.apply([0.02, -0.01, 0]), atol=1e-4)
     assert st.force_n == pytest.approx(80 * 9.80665)

@@ -1,0 +1,16 @@
+# PoseBoard runtime dependencies (Python 3.10+; 3.10-3.12 recommended on Windows).
+# Install with:  pip install -r requirements.txt
+# For running the tests also install:  pip install -r requirements-dev.txt
+
+numpy>=1.24
+# OpenCV. MediaPipe itself depends on "opencv-contrib-python" (a superset of
+# "opencv-python"), so we use the same package here to avoid two packages that both
+# install the "cv2" module. If you drop MediaPipe you may use opencv-python>=4.8 instead.
+opencv-contrib-python>=4.8
+PySide6>=6.5
+# Wii Balance Board over Bluetooth HID (provides the "hid" module with hid.device()).
+hidapi>=0.14
+# Built-in 3D pose backend (tasks PoseLandmarker API).
+mediapipe>=0.10.14
+# TOML reader for Pose2Sim Calib.toml import on Python 3.10 (built in from 3.11 on).
+tomli>=2.0; python_version < "3.11"

@@ -61,7 +61,7 @@ def test_record_and_analyze(tmp_path):
     assert summary["cop"]["path_length_mm"] > 0
     fused = read_csv_columns(folder / "fused.csv")
     assert np.isfinite(fused["total_kg"]).sum() >= 13
-    # COP 世界坐标应落在板面上（z≈板高）
+    # COP world coordinates should lie on the board surface (z ~ board height)
     assert np.nanmax(np.abs(fused["cop_z_world"] - T.t[2])) < 0.01
 
     trc = export_trc(folder)

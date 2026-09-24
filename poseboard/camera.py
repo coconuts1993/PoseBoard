@@ -1,4 +1,5 @@
-"""相机采集线程：每帧带 perf_counter 时间戳，可边采集边写视频。"""
+"""Camera capture thread: every frame carries a perf_counter timestamp; video can be
+written while capturing."""
 
 from __future__ import annotations
 
@@ -41,7 +42,8 @@ def open_capture(source: int | str, width: int | None = None, height: int | None
 
 
 class CameraStream:
-    """后台线程读取一台相机。source 可以是设备序号、视频文件或网络流地址。"""
+    """Reads one camera on a background thread. source can be a device index, a video file
+    or a network stream URL."""
 
     def __init__(self, name: str, source: int | str, width: int | None = None,
                  height: int | None = None, fps: float | None = None):
@@ -67,7 +69,7 @@ class CameraStream:
             return
         self._cap = open_capture(self.source, *self.req)
         if not self._cap.isOpened():
-            raise RuntimeError(f"无法打开相机 {self.source}")
+            raise RuntimeError(f"Cannot open camera {self.source}")
         f = self._cap.get(cv2.CAP_PROP_FPS)
         if f and 1 < f < 1000:
             self.fps = f
@@ -97,10 +99,10 @@ class CameraStream:
             ok, img = self._cap.read()
             t = time.perf_counter()
             if not ok:
-                if self._is_file:  # 视频文件循环播放，方便调试
+                if self._is_file:  # loop video files for easier debugging
                     self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
-                self.error = "读取帧失败"
+                self.error = "Failed to read frame"
                 time.sleep(0.01)
                 continue
             frame = Frame(idx, t, img)
@@ -126,7 +128,7 @@ class CameraStream:
     def start_recording(self, video_path: Path) -> None:
         f = self.latest()
         if f is None:
-            raise RuntimeError(f"相机 {self.name} 还没有画面")
+            raise RuntimeError(f"Camera {self.name} has no frames yet")
         h, w = f.image.shape[:2]
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(str(video_path), fourcc, float(self.fps), (w, h))

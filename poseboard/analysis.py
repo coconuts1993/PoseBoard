@@ -1,6 +1,7 @@
-"""录制后处理：时间对齐、融合表、静态平衡指标，以及导入外部 3D 姿态（如 PoseAssess 输出）。
+"""Post-processing of recordings: time alignment, fused table, static balance metrics,
+and import of external 3D pose (e.g. PoseAssess output).
 
-命令行::
+Command line::
 
     python -m poseboard.analysis recordings/20260924_153000
     python -m poseboard.analysis recordings/20260924_153000 --external pose.trc --offset 0.0
@@ -34,7 +35,8 @@ def read_csv_columns(path: Path) -> dict[str, np.ndarray]:
 
 
 def interp(t_src: np.ndarray, v: np.ndarray, t_dst: np.ndarray, max_gap: float = 0.1) -> np.ndarray:
-    """线性插值；目标时间离最近源样本超过 max_gap 秒或源值为 NaN 时返回 NaN。"""
+    """Linear interpolation; returns NaN where the target time is more than max_gap seconds
+    from the nearest source sample, or where the source value is NaN."""
     ok = np.isfinite(v)
     if ok.sum() < 2:
         return np.full(len(t_dst), np.nan)
@@ -48,7 +50,7 @@ def interp(t_src: np.ndarray, v: np.ndarray, t_dst: np.ndarray, max_gap: float =
 
 # --------------------------------------------------------------------- metrics
 def sway_metrics(t: np.ndarray, x: np.ndarray, y: np.ndarray) -> dict:
-    """常用静态平衡 COP 指标（输入单位米，输出 mm / mm²）。"""
+    """Common static balance COP metrics (input in meters, output in mm / mm²)."""
     ok = np.isfinite(x) & np.isfinite(y)
     t, x, y = t[ok], x[ok] * 1000, y[ok] * 1000
     if len(t) < 10:
@@ -58,7 +60,7 @@ def sway_metrics(t: np.ndarray, x: np.ndarray, y: np.ndarray) -> dict:
     xc, yc = x - x.mean(), y - y.mean()
     cov = np.cov(np.vstack([xc, yc]))
     eig = np.linalg.eigvalsh(cov)
-    # 95% 置信椭圆面积：pi * chi2(0.95, 2) * sqrt(λ1 λ2)
+    # 95% confidence ellipse area: pi * chi2(0.95, 2) * sqrt(λ1 λ2)
     area95 = float(np.pi * 5.991 * np.sqrt(max(eig[0], 0) * max(eig[1], 0)))
     return {
         "duration_s": dur,
@@ -122,16 +124,18 @@ def analyze_session(folder: str | Path) -> dict:
     return summary
 
 
-# Pose2Sim 写 TRC 时把 Z-up 转成了 Y-up：(X', Y', Z') = (Y, Z, X)。其逆变换：
+# When writing TRC, Pose2Sim converts Z-up to Y-up: (X', Y', Z') = (Y, Z, X). Its inverse:
 POSE2SIM_YUP_TO_ZUP = np.array([[0, 0, 1, 0], [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1]], float)
 
 
 def fuse_external(folder: str | Path, pose_file: str | Path, offset_s: float = 0.0,
                   world_transform: np.ndarray | None = None) -> Path:
-    """把外部 3D 姿态（TRC 或 CSV）与本次录制的 Wii 数据对齐并融合。
+    """Align an external 3D pose file (TRC or CSV) with this recording's Wii data and fuse them.
 
-    外部数据的时间 0 对应录制开始 (t0) + offset_s（外部文件的时间列需从录制开始计时）。外部姿态须在同一棋盘格世界坐标系中；
-    若不是，可传入 4x4 ``world_transform``（外部坐标 -> PoseBoard 世界坐标）。
+    Time 0 of the external data corresponds to the recording start (t0) + offset_s (the
+    external file's time column must count from the start of recording). The external pose
+    must be in the same checkerboard world frame; if it is not, pass a 4x4
+    ``world_transform`` (external coordinates -> PoseBoard world coordinates).
     """
     folder = Path(folder)
     meta = json.loads((folder / "session.json").read_text(encoding="utf-8"))
@@ -155,7 +159,7 @@ def fuse_external(folder: str | Path, pose_file: str | Path, offset_s: float = 0
 
 
 def export_trc(folder: str | Path) -> Path:
-    """把 pose3d.csv 导出为 TRC（毫米），方便在 OpenSim / Pose2Sim 中使用。"""
+    """Export pose3d.csv to TRC (millimeters) for use in OpenSim / Pose2Sim."""
     folder = Path(folder)
     pose = read_csv_columns(folder / "pose3d.csv")
     names = [k[:-2] for k in pose if k.endswith("_x") and not k.startswith("com")]
@@ -179,20 +183,20 @@ def export_trc(folder: str | Path) -> Path:
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="PoseBoard 录制后处理")
+    ap = argparse.ArgumentParser(description="PoseBoard recording post-processing")
     ap.add_argument("folder")
-    ap.add_argument("--external", help="外部 3D 姿态文件（.trc 或 .csv）")
-    ap.add_argument("--offset", type=float, default=0.0, help="外部数据相对录制开始的时间偏移（秒）")
+    ap.add_argument("--external", help="external 3D pose file (.trc or .csv)")
+    ap.add_argument("--offset", type=float, default=0.0, help="time offset of the external data relative to the recording start (seconds)")
     ap.add_argument("--pose2sim-yup", action="store_true",
-                    help="外部 TRC 是 Pose2Sim 导出的 Y-up 坐标，转换回棋盘格 Z-up 坐标")
-    ap.add_argument("--trc", action="store_true", help="导出 pose3d.trc")
+                    help="external TRC uses Pose2Sim's Y-up coordinates; convert back to checkerboard Z-up")
+    ap.add_argument("--trc", action="store_true", help="export pose3d.trc")
     a = ap.parse_args(argv)
     print(json.dumps(analyze_session(a.folder), indent=2, ensure_ascii=False))
     if a.external:
         T = POSE2SIM_YUP_TO_ZUP if a.pose2sim_yup else None
-        print("写入", fuse_external(a.folder, a.external, a.offset, T))
+        print("Wrote", fuse_external(a.folder, a.external, a.offset, T))
     if a.trc:
-        print("写入", export_trc(a.folder))
+        print("Wrote", export_trc(a.folder))
 
 
 if __name__ == "__main__":

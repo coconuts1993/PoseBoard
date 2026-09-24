@@ -1,14 +1,15 @@
-"""同步录制：Wii 力数据、各相机视频（带逐帧时间戳）、3D 姿态，全部使用同一 perf_counter 时钟。
+"""Synchronized recording: Wii force data, video from each camera (with per-frame
+timestamps) and 3D pose, all on the same perf_counter clock.
 
-输出目录结构::
+Output folder layout::
 
     recordings/20260924_153000_subject/
-        session.json            标定、平衡板位姿、设备信息、起止时间
-        wii.csv                 ~100 Hz：四传感器 kg、总重、COP（板坐标 + 世界坐标）
-        pose3d.csv              每个姿态帧：关键点世界坐标 + COM
+        session.json            calibration, board pose, device info, start/stop times
+        wii.csv                 ~100 Hz: four sensors in kg, total weight, COP (board + world coords)
+        pose3d.csv              one row per pose frame: keypoint world coordinates + COM
         cam0.mp4, cam0_timestamps.csv
-        fused.csv               停止后生成：在姿态时间点插值的力数据 + COM/COP
-        summary.json            停止后生成：静态平衡指标
+        fused.csv               written after stop: force data interpolated at pose timestamps + COM/COP
+        summary.json            written after stop: static balance metrics
 """
 
 from __future__ import annotations

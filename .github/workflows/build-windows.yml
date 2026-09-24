@@ -1,0 +1,75 @@
+name: Build Windows exe
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pyinstaller
+
+      - name: Download MediaPipe pose model (bundled into the exe)
+        run: python -c "from poseboard.pose.mediapipe_backend import ensure_model; print(ensure_model('full'))"
+
+      - name: Run tests
+        run: python -m pytest -q tests
+
+      - name: Build with PyInstaller
+        run: pyinstaller installer/poseboard.spec --noconfirm
+
+      - name: Self-test PoseBoard.exe (GUI, headless)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\PoseBoard\PoseBoard.exe -ArgumentList '--selftest' -Wait -PassThru
+          if (Test-Path dist\PoseBoard\poseboard.log) { Get-Content dist\PoseBoard\poseboard.log; Remove-Item dist\PoseBoard\poseboard.log }
+          if ($p.ExitCode -ne 0) { throw "PoseBoard.exe --selftest failed with exit code $($p.ExitCode)" }
+
+      - name: Self-test PoseBoard-Wii.exe (simulated board)
+        shell: pwsh
+        run: |
+          dist\PoseBoard\PoseBoard-Wii.exe --simulate --seconds 2 --out $env:RUNNER_TEMP\wii_selftest
+          if ($LASTEXITCODE -ne 0) { throw "PoseBoard-Wii.exe failed with exit code $LASTEXITCODE" }
+          $csv = Get-ChildItem -Recurse $env:RUNNER_TEMP\wii_selftest -Filter wii.csv | Select-Object -First 1
+          if (-not $csv) { throw "wii.csv was not written" }
+          Get-Content $csv.FullName -TotalCount 3
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item README.md dist\PoseBoard\
+          Compress-Archive -Path dist\PoseBoard -DestinationPath PoseBoard-windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PoseBoard-windows-x64
+          path: PoseBoard-windows-x64.zip
+          retention-days: 30
+
+      - name: Attach to GitHub release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: PoseBoard-windows-x64.zip

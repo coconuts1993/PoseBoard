@@ -1,10 +1,10 @@
-"""接入外部 3D 姿态：
+"""Using external 3D pose sources:
 
-1. 插件：一个 Python 文件里定义 ``create_estimator(**kwargs) -> PoseEstimator``，
-   在界面里选择该文件即可在实时采集中使用（例如把你的 PoseAssess 包装成插件）。
-   参见 ``plugins/poseassess_plugin_template.py``。
-2. 离线导入：读取 TRC（Pose2Sim / OpenSim 格式）或 CSV 的 3D 关键点文件，
-   再与 PoseBoard 录制的 Wii 数据按时间对齐（见 ``poseboard.analysis``）。
+1. Plugin: a Python file that defines ``create_estimator(**kwargs) -> PoseEstimator``.
+   Select the file in the GUI to use it for live acquisition (e.g. wrap your PoseAssess
+   as a plugin). See ``plugins/poseassess_plugin_template.py``.
+2. Offline import: read a 3D keypoint file in TRC (Pose2Sim / OpenSim format) or CSV,
+   then align it in time with the Wii data recorded by PoseBoard (see ``poseboard.analysis``).
 """
 
 from __future__ import annotations
@@ -22,19 +22,19 @@ def load_plugin(path: str | Path, **kwargs) -> PoseEstimator:
     path = Path(path)
     spec = importlib.util.spec_from_file_location(f"poseboard_plugin_{path.stem}", path)
     if spec is None or spec.loader is None:
-        raise ImportError(f"无法加载插件 {path}")
+        raise ImportError(f"Cannot load plugin {path}")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     if not hasattr(mod, "create_estimator"):
-        raise ImportError("插件必须定义 create_estimator(**kwargs) -> PoseEstimator")
+        raise ImportError("Plugin must define create_estimator(**kwargs) -> PoseEstimator")
     est = mod.create_estimator(**kwargs)
     if not isinstance(est, PoseEstimator):
-        raise TypeError("create_estimator 必须返回 PoseEstimator 实例")
+        raise TypeError("create_estimator must return a PoseEstimator instance")
     return est
 
 
 def read_trc(path: str | Path) -> tuple[np.ndarray, list[str], np.ndarray, dict]:
-    """读取 TRC 文件，返回 (时间 (N,), 关键点名, 坐标 (N,K,3) 米, 头信息)。"""
+    """Read a TRC file; returns (times (N,), keypoint names, coordinates (N,K,3) in meters, header)."""
     lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
     header_keys = lines[1].split("\t")
     header_vals = lines[2].split("\t")
@@ -58,7 +58,7 @@ def read_trc(path: str | Path) -> tuple[np.ndarray, list[str], np.ndarray, dict]
 
 
 def read_keypoint_csv(path: str | Path) -> tuple[np.ndarray, list[str], np.ndarray]:
-    """读取 CSV：第一列时间（列名 t/time），之后为 <name>_x, <name>_y, <name>_z 列（米）。"""
+    """Read a CSV: first column is time (header t/time), then <name>_x, <name>_y, <name>_z (meters)."""
     with open(path, newline="", encoding="utf-8") as f:
         rows = list(csv.reader(f))
     head = rows[0]

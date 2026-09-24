@@ -1,9 +1,12 @@
-"""MediaPipe Pose Landmarker 后端（mediapipe>=0.10 的 tasks API）。
+"""MediaPipe Pose Landmarker backend (tasks API, mediapipe>=0.10).
 
-* 单相机：用 MediaPipe 的 world landmarks（以髋部为原点、单位米的 3D 骨架）
-  与 2D 像素关键点做 PnP，得到骨架在相机坐标系中的位置，再经相机外参变换到世界坐标系。
-  深度方向精度有限，但足以把人体骨架与平衡板放到同一坐标系中。
-* 多相机（≥2 台已标定外参）：每台相机检测 2D 关键点后加权三角化，精度更高。
+* Single camera: run PnP between MediaPipe's world landmarks (a hip-centered 3D skeleton
+  in meters) and the 2D pixel keypoints to get the skeleton's position in the camera
+  frame, then transform it to the world frame with the camera extrinsics.
+  Depth accuracy is limited, but good enough to put the body skeleton and the balance
+  board in the same coordinate frame.
+* Multiple cameras (>= 2 with calibrated extrinsics): detect 2D keypoints in each camera,
+  then triangulate with confidence weights for higher accuracy.
 """
 
 from __future__ import annotations
@@ -88,7 +91,7 @@ class MediaPipePose(PoseEstimator):
         return self._landmarkers[cam_name]
 
     def detect(self, cam_name: str, t: float, image: np.ndarray):
-        """返回 (Pose2D, world_landmarks(33,3)) 或 None。"""
+        """Return (Pose2D, world_landmarks(33,3)) or None."""
         import mediapipe as mp
 
         lm = self._landmarker(cam_name)
@@ -142,7 +145,7 @@ class MediaPipePose(PoseEstimator):
 
 def single_view_lift(cam: CameraCalibration, pose2d: Pose2D, body_pts: np.ndarray,
                      min_score: float = 0.5) -> np.ndarray | None:
-    """用 PnP 把以身体为原点的 3D 骨架放到世界坐标系中（单相机）。"""
+    """Place a body-centered 3D skeleton in the world frame using PnP (single camera)."""
     mask = ((pose2d.scores >= min_score) & np.all(np.isfinite(body_pts), axis=1)
             & np.all(np.isfinite(pose2d.keypoints), axis=1))
     if mask.sum() < 6:

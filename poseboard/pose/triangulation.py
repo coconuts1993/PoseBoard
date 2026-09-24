@@ -1,4 +1,4 @@
-"""多相机关键点三角化（加权 DLT）。"""
+"""Multi-camera keypoint triangulation (weighted DLT)."""
 
 from __future__ import annotations
 
@@ -10,10 +10,11 @@ from poseboard.calibration import CameraCalibration
 def triangulate_keypoints(cams: list[CameraCalibration], poses_2d: list[np.ndarray],
                           scores: list[np.ndarray], min_score: float = 0.5
                           ) -> tuple[np.ndarray, np.ndarray]:
-    """对每个关键点做加权 DLT。
+    """Weighted DLT for each keypoint.
 
-    poses_2d[i]: (K,2) 第 i 台相机的像素坐标；scores[i]: (K,) 置信度。
-    返回 (K,3) 世界坐标（不足两视角的点为 NaN）以及 (K,) 平均置信度。
+    poses_2d[i]: (K,2) pixel coordinates from camera i; scores[i]: (K,) confidences.
+    Returns (K,3) world coordinates (NaN for points seen in fewer than two views) and
+    (K,) mean confidences.
     """
     K = poses_2d[0].shape[0]
     norm = [c.undistort_normalized(p) for c, p in zip(cams, poses_2d)]

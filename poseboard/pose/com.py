@@ -1,8 +1,9 @@
-"""基于节段模型的人体重心（COM）估计。
+"""Whole-body center of mass (COM) estimation from a segment model.
 
-节段质量比例与重心位置采用 Winter (2009) *Biomechanics and Motor Control of Human
-Movement* 表 4.1。关键点名称做了归一化匹配，兼容 MediaPipe（left_hip）、
-OpenPose/Halpe/Pose2Sim（LHip, LBigToe）等常见命名。
+Segment mass fractions and COM locations follow Winter (2009) *Biomechanics and Motor
+Control of Human Movement*, Table 4.1. Keypoint names are matched after normalization,
+so common naming schemes such as MediaPipe (left_hip) and OpenPose/Halpe/Pose2Sim
+(LHip, LBigToe) are supported.
 """
 
 from __future__ import annotations
@@ -11,8 +12,8 @@ import re
 
 import numpy as np
 
-# (质量比例, 起点, 终点, COM 距起点的比例)
-# 起点/终点为 "部位" 名称，由 _locate() 解析（l/r 前缀表示左右）
+# (mass fraction, proximal point, distal point, COM position as a fraction from proximal)
+# Proximal/distal are "part" names resolved by _locate() (l/r prefix = left/right)
 SEGMENTS = [
     ("head", 0.081, "head", "head", 0.0),
     ("trunk", 0.497, "mid_shoulder", "mid_hip", 0.5),
@@ -46,7 +47,7 @@ def _norm(name: str) -> str:
 
 
 class KeypointIndex:
-    """把任意命名的关键点映射到 COM 模型需要的部位。"""
+    """Map arbitrarily named keypoints to the body parts required by the COM model."""
 
     def __init__(self, names: list[str]):
         self.names = list(names)
@@ -88,16 +89,17 @@ def _point(kp: np.ndarray, idx: KeypointIndex, token: str) -> np.ndarray | None:
         return None
     side, part = token.split("_", 1)
     p = get(side, part)
-    if p is None and part == "heel":  # 没有足跟点时用踝关节代替
+    if p is None and part == "heel":  # fall back to the ankle when there is no heel point
         p = get(side, "ankle")
     return p
 
 
 def center_of_mass(keypoints: np.ndarray, names: list[str],
                    return_segments: bool = False):
-    """由 3D 关键点估计全身重心。缺失的节段按剩余节段的质量重新归一化。
+    """Estimate the whole-body COM from 3D keypoints. Missing segments are handled by
+    renormalizing over the mass of the remaining segments.
 
-    至少需要躯干（双肩 + 双髋）才返回结果，否则返回 None。
+    At least the trunk (both shoulders + both hips) is required; otherwise returns None.
     """
     idx = KeypointIndex(names)
     kp = np.asarray(keypoints, np.float64)

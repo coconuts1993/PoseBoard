@@ -152,7 +152,12 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._tab_calibration(), "2 Camera Calibration")
         self.tabs.addTab(self._tab_board(), "3 Board Setup")
         self.tabs.addTab(self._tab_record(), "4 Record")
-        self.tabs.setMinimumWidth(420)
+        # Keep every tab title fully visible (no scroll arrows / clipped "4 Rec..."): the panel is at
+        # least as wide as the whole tab bar, whatever the platform font.
+        bar = self.tabs.tabBar()
+        bar.setUsesScrollButtons(False)
+        bar.setElideMode(Qt.ElideNone)
+        self.tabs.setMinimumWidth(max(420, self.tabs.minimumSizeHint().width()))
         splitter.addWidget(self.tabs)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
@@ -738,9 +743,13 @@ class MainWindow(QMainWindow):
             self.b_rec.setText("■ Stop Recording")
             self.status.showMessage(f"Recording to {folder}")
         else:
+            elapsed = time.perf_counter() - self._rec_started
             folder = self.recorder.stop()
             self.b_rec.setText("● Start Recording")
             if folder:
+                c = self.recorder.counts
+                self.rec_label.setText(f"Stopped after {elapsed:.1f}s   Wii {c['wii']}  Pose {c['pose']}")
+                self.status.showMessage(f"Saved to {folder}")
                 s = folder / "summary.json"
                 text = s.read_text(encoding="utf-8") if s.exists() else ""
                 self.summary.setPlainText(f"Saved: {folder}\n\n{text}")

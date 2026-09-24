@@ -29,12 +29,13 @@ import numpy as np
 import pytest
 
 from poseboard.calibration import approximate_calibration
+from poseboard.geometry import project_to_image
 from poseboard.pose.base import MODE_2D_ONLY, MODE_SINGLE_VIEW_3D
 from poseboard.pose.detectors import BACKENDS, backend_available, create_detector
 from poseboard.pose.detectors import rtmlib_det as rd
 from poseboard.pose.detectors.base import Detector2D
 from poseboard.pose.formats import COCO17, FORMATS, HALPE26, WHOLEBODY133
-from poseboard.pose.multiview import MultiViewEstimator
+from poseboard.pose.multiview import MultiViewEstimator, single_view_lift
 from tests.conftest import download_cached
 from tests.fakes import standing_person
 
@@ -718,6 +719,12 @@ def test_real_model_on_the_photo(key, person_image, mediapipe_reference):
                                     - k3[fmt.index("right_shoulder")]) < 0.6
         assert k3[fmt.index("left_shoulder"), 0] > k3[fmt.index("right_shoulder"), 0]
         assert k3[fmt.index("left_ankle"), 1] > k3[fmt.index("left_hip"), 1]  # y down
+        # placed with one (approximately calibrated) camera like MultiViewEstimator does
+        cam = approximate_calibration("cam0", w, h)
+        pts = single_view_lift(cam, p, k3, 0.3)
+        assert pts is not None and np.all(pts[body, 2] > 0)
+        reproj = np.linalg.norm(project_to_image(cam, pts[body]) - p.keypoints[body], axis=1)
+        assert reproj.mean() < 25, reproj
     if mediapipe_reference is None:
         pytest.skip("MediaPipe reference unavailable: the comparison with MediaPipe was not run")
     tol = 0.08 * np.hypot(w, h)

@@ -72,9 +72,11 @@ move it). When that fails the factories raise ``ModelUnavailable``; download the
 elsewhere and pass its local path (``.onnx``, or the mmdeploy ``.zip``) as ``pose_model=`` /
 ``det_model=``. Other factory options: ``backend`` ("onnxruntime", "opencv", "openvino"),
 ``det_input_size`` / ``pose_input_size`` (taken from the ONNX file when a custom model is
-given), ``det_mode="multiclass"`` for an 80-class COCO YOLOX (only class ``person_class`` = 0
-is kept), ``det_score_thr``, ``nms_thr``, ``rgb_input``, ``score_scale`` and, for
-rtmpose3d, ``body_height``.
+given), ``det_mode="multiclass"`` for an 80-class COCO YOLOX without built-in NMS, e.g. the
+YOLOX releases on GitHub (only class ``person_class`` = 0 is kept), ``det_score_thr`` /
+``nms_thr`` (RTMO, and YOLOX files without built-in NMS; for YOLOX files with built-in NMS,
+as rtmlib's mmdeploy files seem to be, rtmlib applies a fixed 0.3 threshold), ``rgb_input``,
+``score_scale`` and, for rtmpose3d, ``body_height``.
 """
 
 from __future__ import annotations
@@ -553,9 +555,8 @@ class RTMPose3DDetector(RTMLibDetector):
             kp = kp2[i, :, :2][self._index]
             r = raw[i][self._index]
             z = self.depth_m(simcc[i, :, 2][self._index])
-            sc = self.normalize_scores(r)
-            sc[~(r > 0)] = 0.0
-            p = self._person(kp, r, box, self.metric_3d(kp, z, sc))
+            k3 = self.metric_3d(kp, z, self.normalize_scores(r))
+            p = self._person(kp, r, box, k3)
             if p is not None:
                 people.append(p)
         return people

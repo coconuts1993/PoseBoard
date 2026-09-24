@@ -29,13 +29,21 @@ FORCE_COLS = ["TR_kg", "BR_kg", "TL_kg", "BL_kg", "total_kg", "cop_x_board", "co
 EVENT_COLS = ["type", "t", "t_rel", "t_unix", "flight_s", "peak_kg"]
 
 
+def _float(v: str) -> float:
+    try:
+        return float(v) if v != "" else np.nan
+    except ValueError:  # a text column, e.g. "mode" in pose3d.csv
+        return np.nan
+
+
 def read_csv_columns(path: Path) -> dict[str, np.ndarray]:
+    """All columns of a CSV as float arrays (empty or non-numeric values are NaN)."""
     with open(path, newline="", encoding="utf-8-sig") as f:
         rows = list(csv.reader(f))
     head, body = rows[0], rows[1:]
     out = {}
     for i, h in enumerate(head):
-        out[h] = np.array([float(r[i]) if i < len(r) and r[i] != "" else np.nan for r in body])
+        out[h] = np.array([_float(r[i]) if i < len(r) else np.nan for r in body])
     return out
 
 

@@ -23,12 +23,18 @@ for model in (ROOT / "models").glob("pose_landmarker_*.task"):
 if (ROOT / "plugins").is_dir():
     datas.append((str(ROOT / "plugins"), "plugins"))
 
+# Pose backends are imported by name (poseboard.pose.detectors.create_detector), which the
+# import analysis cannot see: bundle every backend module. A backend whose packages (PyTorch,
+# ONNX Runtime, ...) are not installed at build time is reported as unavailable at run time.
 hidden = mp_hidden + [
     "hid",
     "poseboard.pose.mediapipe_backend",
+    "poseboard.pose.multiview",
     "poseboard.pose.external",
     "poseboard.analysis",
-]
+    "poseboard.pose.detectors",
+] + sorted(f"poseboard.pose.detectors.{p.stem}"
+           for p in (ROOT / "poseboard" / "pose" / "detectors").glob("*.py") if p.stem != "__init__")
 # matplotlib must stay: mediapipe.tasks.python.vision imports it (drawing_utils).
 excludes = ["tkinter", "IPython", "pytest"]
 

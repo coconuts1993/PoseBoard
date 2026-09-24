@@ -127,6 +127,8 @@ def center_of_mass(keypoints: np.ndarray, names: list[str],
     """
     idx = KeypointIndex(names)
     kp = np.asarray(keypoints, np.float64)
+    if not np.isfinite(kp).any():  # no 3D at all (e.g. a "2d_only" pose): nothing to report
+        return (None, {}) if return_segments else None
     total_m, acc = 0.0, np.zeros(kp.shape[1])
     segs = {}
     for seg, m, a, b, r in SEGMENTS:

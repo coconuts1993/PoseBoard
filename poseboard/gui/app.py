@@ -39,7 +39,7 @@ from poseboard.fusion import fuse
 from poseboard.geometry import (LANDMARK_NAMES, BoardGeometry, BoardPose, register_board,
                                 rotate_board_frame)
 from poseboard.overlay import draw_board, draw_clicks, draw_cop, draw_pose
-from poseboard.pose.base import Pose3D, PoseEstimator, check_pose3d
+from poseboard.pose.base import Pose3D, PoseEstimator, attach_frame_info, check_pose3d
 from poseboard.pose.com import center_of_mass
 from poseboard.session import SessionRecorder, on_console_close
 from poseboard.wii.device import (DEFAULT_COP_MIN_KG, BalanceBoardHID, ForceSource, SimulatedBoard,
@@ -167,6 +167,7 @@ class PoseWorker:
             return True  # stopped meanwhile: drop the result
         if pose is not None:
             pose = check_pose3d(pose)
+            attach_frame_info(pose, {n: frames[n] for n in use})  # recorded video frame numbers
         dt = time.perf_counter() - t0
         self.fps = 0.9 * self.fps + 0.1 / max(dt, 1e-3) if self.fps else 1 / max(dt, 1e-3)
         self.latest = pose
@@ -1292,6 +1293,8 @@ class MainWindow(QMainWindow):
                     cams=list(self.streams.values()), calibrations=dict(calibs),
                     force=wii, board=self.board, geometry=self.geometry,
                     pose_backend=self.pose_backend.currentText() if self.pose_worker else None,
+                    pose_backend_key=(getattr(self.pose_worker.estimator, "name", None)
+                                      if self.pose_worker else None),
                     subject=self.subject.text().strip(), notes=self.notes.text())
             except Exception as e:  # noqa: BLE001
                 self.b_rec.setChecked(False)

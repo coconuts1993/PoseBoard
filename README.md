@@ -548,11 +548,13 @@ so a crash loses at most the last second.
 
 | File | Content |
 |---|---|
-| `session.json` | Metadata: `created`, `subject`, `notes`, `clock` (description), **clock fields** `t0`, `t0_unix`, `clock_offset_unix`, `start_time_iso`, and at stop `t_stop`, `t_stop_unix`, `stop_time_iso`, `duration_s`; **stream flags** `has_wii`, `has_pose`, `has_video`, `camera_names`; `world_frame`, `board_geometry`, `board_pose` (`board_to_world` R/t, `method` pnp/triangulation, `reproj_error_px`, `floor_constrained`, `tilt_deg`, `world_camera` (camera whose frame is the world when no extrinsics were set), `warnings`, `notes`; `null` if not registered), `cameras` (the calibrations used for the recorded cameras), `streams` (name, source, fps, video file), `force_source` (at the end of the recording: type, tare, COP min. load, sensor spacing, board calibration, battery, device path; for auto-connect also the number of connections/disconnects; `null` without a board), `force_source_history` (device and tare in effect from each start/connection, with `t_rel`), `pose_backend`, `samples` (counts of `wii`, `pose`, `events` rows). |
+| `session.json` | Metadata: `created`, `subject`, `notes`, `clock` (description), **clock fields** `t0`, `t0_unix`, `clock_offset_unix`, `start_time_iso`, and at stop `t_stop`, `t_stop_unix`, `stop_time_iso`, `duration_s`; **stream flags** `has_wii`, `has_pose`, `has_video`, `camera_names`; `world_frame`, `board_geometry`, `board_pose` (`board_to_world` R/t, `method` pnp/triangulation, `reproj_error_px`, `floor_constrained`, `tilt_deg`, `world_camera` (camera whose frame is the world when no extrinsics were set), `warnings`, `notes`; `null` if not registered), `cameras` (the calibrations used for the recorded cameras), `streams` (name, source, fps, video file), `force_source` (at the end of the recording: type, tare, COP min. load, sensor spacing, board calibration, battery, device path; for auto-connect also the number of connections/disconnects; `null` without a board), `force_source_history` (device and tare in effect from each start/connection, with `t_rel`), `pose_backend` (label of the pose source), `pose_backend_key` (backend key, e.g. `mediapipe`), `keypoint_format` (e.g. `coco17`, `halpe26`, `mediapipe33`) and `pose2sim_model` (the matching Pose2Sim `pose_model`, e.g. `COCO_17`, `HALPE_26`, `BLAZEPOSE`), `pose_info` (backend details, if known), `pose2d` (`cameras` with a `pose2d_<camera>.csv`, `openpose_json`, `json_dir`, `json_sets_written`, `json_sets_skipped`), `samples` (counts of `wii`, `pose`, `events` rows). |
 | `wii.csv` | Every Balance Board sample (only if a board or the simulator was connected during the recording). |
 | `camN.mkv` | Video of camera `camN` (MPEG-4 in a Matroska container; plays in VLC, the Windows media apps and OpenCV; if the recording ends abruptly, e.g. a crash or power loss, the file stays readable up to the last few seconds, where an MP4 would be lost completely). Convert to MP4 without re-encoding if needed: `ffmpeg -i cam0.mkv -c copy cam0.mp4`. If the MKV writer is not available, `camN.avi` (MJPG) is written instead (`streams[].video` names the file). The frame rate in the file header is nominal; use the timestamps. |
 | `camN_timestamps.csv` | `frame`, `t`, `t_rel`, `t_unix`: capture time of every stored video frame (one row per frame in the video). |
 | `pose3d.csv` | One row per pose result (only if pose estimation ran during the recording). |
+| `pose2d_<camera>.csv` | The subject's 2D keypoints in every processed frame of that camera (see below). |
+| `pose2d_json/<camera>/` | Optional (recorder option `save_openpose_json`): one OpenPose-format file per processed frame, `<camera>_<frame:012d>_keypoints.json`, for re-triangulating offline with Pose2Sim (see below). |
 | `events.csv` | Event markers: `t`, `t_rel`, `t_unix`, `label`. Written when the first marker is added: **Mark Event** / F9 in the GUI, a typed label in the Wii-only recorder, and automatic markers: `wii_connected` / `wii_disconnected` when the board link changes, `camera_lost <name>` / `camera_recovered <name>` / `camera_removed <name>`, and `pose_keypoints_changed`. UTF-8 with a byte order mark, so Excel shows non-ASCII labels correctly when the file is double-clicked. |
 | `fused.csv` | Written at stop: Wii data linearly interpolated at the pose timestamps, next to the COM (needs `wii.csv` and `pose3d.csv`). |
 | `summary.json` | Written at stop: sway metrics (see below). |
@@ -578,6 +580,27 @@ so a crash loses at most the last second.
 | `<name>_x`, `<name>_y`, `<name>_z`, `<name>_score` | for every keypoint (e.g. MediaPipe `left_shoulder_x`, or `LShoulder_x` from a Halpe-26 plugin): world position (m) and confidence; empty if missing. The columns are fixed by the first pose of the recording; later poses are stored by keypoint name. |
 | `com_x`, `com_y`, `com_z` | whole-body COM in the world frame (m) |
 | `com_x_board`, `com_y_board`, `com_z_board` | COM in the board frame (m) |
+| `mode` | how the 3D keypoints were obtained: `triangulated` (two or more cameras with extrinsics), `single_view_3d` (one camera, the backend's 3D skeleton placed with PnP) or `2d_only` (no 3D possible, e.g. one camera and a 2D-only backend: keypoints and COM are empty) |
+| `reproj_error_px` | mean reprojection error of the 3D keypoints in the cameras used (pixels) |
+
+**`pose2d_<camera>.csv` columns** (one row per processed frame of that camera; a frame in which
+no subject was found has empty keypoint values)
+
+| Column | Meaning |
+|---|---|
+| `t`, `t_rel`, `t_unix` | capture time of that camera frame (as in `camN_timestamps.csv`) |
+| `frame` | the frame number in `camN.mkv` (the `frame` column of `camN_timestamps.csv`); empty if the frame is not in the video (e.g. captured just before the recording started) |
+| `<name>_x`, `<name>_y`, `<name>_score` | pixel coordinates in the original image and confidence (0-1) of every keypoint of the backend's format |
+
+**OpenPose JSON** (`pose2d_json/<camera>/<camera>_<frame:012d>_keypoints.json`, `frame` = video
+frame number): `{"version": 1.3, "people": [{"person_id": [-1], "pose_keypoints_2d": [x1, y1,
+c1, x2, ...], "face_keypoints_2d": [], "hand_left_keypoints_2d": [], "hand_right_keypoints_2d":
+[], "pose_keypoints_3d": [], ...}]}` with all keypoints of the format in `pose_keypoints_2d`
+(missing = `0, 0, 0`), and an empty `people` list when no subject was found. The files of all
+cameras are written together for every processed multi-camera frame set (a set with a frame that
+is not in the videos is skipped in all cameras), so the n-th file of each camera folder belongs
+to the same instant, as Pose2Sim expects. Use the `pose2sim_model` of `session.json` as Pose2Sim's
+`pose_model` and export the calibration with **File -> Export Pose2Sim Calib.toml...**.
 
 **`fused.csv` columns**: `t`, `t_rel`, `t_unix`, `TR_kg`, `BR_kg`, `TL_kg`, `BL_kg`, `total_kg`,
 `cop_x_board`, `cop_y_board`, `cop_x_world`, `cop_y_world`, `cop_z_world`, `com_x`, `com_y`,
@@ -941,8 +964,13 @@ PoseBoard/
 │   ├── pose/
 │   │   ├── base.py            Pose2D / Pose3D / PoseEstimator interface
 │   │   ├── com.py             center of mass (Winter segment table)
-│   │   ├── mediapipe_backend.py  MediaPipe backend, single-view lifting
-│   │   ├── triangulation.py   multi-camera keypoint triangulation
+│   │   ├── formats.py         keypoint formats (COCO-17, Halpe-26, BODY_25, COCO-18, WholeBody-133, MediaPipe-33)
+│   │   ├── detectors/         2D pose backends: registry (__init__.py), Detector2D/Person2D (base.py), MediaPipe
+│   │   ├── multiview.py       any 2D backend -> 3D: triangulation with outlier rejection, single-view lifting
+│   │   ├── subject.py         picks the person standing on the board in each camera
+│   │   ├── filters.py         One-Euro keypoint smoothing
+│   │   ├── mediapipe_backend.py  MediaPipe model files, MediaPipePose (compatibility)
+│   │   ├── triangulation.py   multi-camera keypoint triangulation (weighted DLT, robust)
 │   │   └── external.py        plugin loader, TRC / CSV readers
 │   └── gui/
 │       ├── app.py             main window (tabs 1-4)

@@ -28,9 +28,12 @@ FLUSH_INTERVAL_S = 1.0  # timestamp CSV is flushed about once per second
 
 @dataclass
 class Frame:
-    index: int
-    t: float
+    index: int  # running number of the frames read from this camera
+    t: float  # capture time (perf_counter)
     image: np.ndarray
+    # Frame number in the video being recorded (the "frame" column of camN_timestamps.csv),
+    # set when the frame is written; None if it was not written to a recording.
+    rec_index: int | None = None
 
 
 def configure_capture(cap, width: int | None = None, height: int | None = None,
@@ -195,7 +198,7 @@ class CameraStream:
                 self._latest = frame
                 if self._writer is not None:
                     try:
-                        self._write_frame(img, t)
+                        self._write_frame(frame)
                     except Exception as e:  # noqa: BLE001  (disk full, removed drive, ...)
                         failed = e
             if failed is not None:
@@ -205,8 +208,9 @@ class CameraStream:
             if period:
                 time.sleep(max(0.0, period - (time.perf_counter() - t)))
 
-    def _write_frame(self, img: np.ndarray, t: float) -> None:
+    def _write_frame(self, frame: Frame) -> None:
         # caller holds self._lock
+        img, t = frame.image, frame.t
         h, w = img.shape[:2]
         if (w, h) != self._rec_size:
             # The writer silently drops frames of another size: do not log a timestamp for them
@@ -219,6 +223,7 @@ class CameraStream:
         self._writer.write(img)
         self._ts_writer.writerow([self._rec_index, f"{t:.6f}", f"{t - self._rec_t0:.6f}",
                                   f"{t + self._rec_offset:.6f}"])
+        frame.rec_index = self._rec_index
         self._rec_index += 1
         if t - self._last_flush >= FLUSH_INTERVAL_S:
             self._ts_file.flush()

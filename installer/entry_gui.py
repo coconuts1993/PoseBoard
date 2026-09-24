@@ -1,8 +1,8 @@
 """PyInstaller entry point for PoseBoard.exe (GUI).
 
 ``PoseBoard.exe --selftest`` runs a headless smoke test (used by CI): it opens the main
-window offscreen, streams the simulated Wii board, runs MediaPipe on a blank frame and
-exits with code 0 on success.
+window offscreen, streams the simulated Wii board, runs MediaPipe on a blank frame (directly
+and through the pose backend registry) and exits with code 0 on success.
 """
 
 from __future__ import annotations
@@ -36,6 +36,15 @@ def selftest() -> int:
     est = MediaPipePose("full")
     est.detect("selftest", 0.0, np.zeros((240, 320, 3), np.uint8))
     est.close()
+
+    # The backend registry finds its (lazily imported) modules in the frozen app
+    from poseboard.pose.detectors import backend_available, create_detector
+
+    ok, why = backend_available("mediapipe")
+    assert ok, why
+    det = create_detector("mediapipe", model="full")
+    assert det.detect(np.zeros((240, 320, 3), np.uint8), 0.0, "selftest") == []
+    det.close()
 
     import hid  # noqa: F401  (hidapi must be bundled for the real board)
 

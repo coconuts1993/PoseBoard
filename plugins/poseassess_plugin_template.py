@@ -42,7 +42,17 @@ What you must return
     ``names``      keypoint names (``self.keypoint_names``);
     ``keypoints``  (K, 3) world coordinates in meters, NaN for missing points;
     ``scores``     (K,) confidences in 0..1;
-    ``per_camera_2d`` optional ``{camera name: Pose2D}``, used to draw the 2D skeleton.
+    ``per_camera_2d`` optional ``{camera name: Pose2D}``, used to draw the 2D skeleton and
+                   recorded in ``pose2d_<camera>.csv`` (and as OpenPose JSON if enabled);
+    optional:      ``mode`` (``"triangulated"``, ``"single_view_3d"`` or ``"2d_only"``),
+                   ``reproj_error_px``, ``notes`` (texts shown to the user) and
+                   ``format_key`` (a key of ``poseboard.pose.formats.FORMATS`` if your
+                   keypoints follow one of those layouts).
+
+A 2D model can also be added as a pose backend instead of a plugin: implement a
+``Detector2D`` (``poseboard/pose/detectors/base.py``) and wrap it in
+``poseboard.pose.multiview.MultiViewEstimator``, which does the subject selection,
+triangulation with outlier rejection, single-view lifting and smoothing for you.
 
 ``process`` runs in a background thread and always receives the newest frames, so a slow
 model simply lowers the pose rate (frames are skipped, never queued). Raise an exception

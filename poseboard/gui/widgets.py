@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen
+from PySide6.QtGui import QColor, QFontMetricsF, QImage, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 
@@ -80,6 +80,9 @@ class VideoView(QWidget):
 class CopView(QWidget):
     """Top-down board view: outline, sensors, COP trail (blue) and projected COM trail (orange)."""
 
+    SENSOR_DOT_PX = 5  # radius of the sensor dots
+    LABEL_GAP_PX = 6  # space between a dot and its label
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(300, 200)
@@ -97,30 +100,56 @@ class CopView(QWidget):
         self.text = text
         self.update()
 
+    def _layout(self) -> tuple[float, float, float]:
+        """(pixels per meter, x and y of the board center on screen)."""
+        bw, bh = self.board_mm[0] / 1000, self.board_mm[1] / 1000
+        margin = 20
+        s = min((self.width() - 2 * margin) / bw, (self.height() - 2 * margin - 16) / bh)
+        return s, self.width() / 2, (self.height() + 16) / 2
+
+    def _pt(self, x: float, y: float) -> QPointF:
+        """Board coordinates (meters, y forward) -> screen (front facing up)."""
+        s, cx, cy = self._layout()
+        return QPointF(cx + x * s, cy - y * s)
+
+    def board_rect(self) -> QRectF:
+        bw, bh = self.board_mm[0] / 1000, self.board_mm[1] / 1000
+        return QRectF(self._pt(-bw / 2, bh / 2), self._pt(bw / 2, -bh / 2))
+
+    def sensor_layout(self, fm: QFontMetricsF | None = None) -> dict[str, tuple[QPointF, QRectF]]:
+        """{sensor: (dot center, label rectangle)}. Each label sits inside the board, beside its
+        dot on the side facing the board center, so it never covers the board outline."""
+        fm = fm or QFontMetricsF(self.font())
+        sx, sy = self.sensor_mm[0] / 2000, self.sensor_mm[1] / 2000
+        out = {}
+        for name, (x, y) in {"TL": (-sx, sy), "TR": (sx, sy), "BL": (-sx, -sy),
+                             "BR": (sx, -sy)}.items():
+            c = self._pt(x, y)
+            w, h = fm.horizontalAdvance(name), fm.height()
+            gap = self.SENSOR_DOT_PX + self.LABEL_GAP_PX
+            left = c.x() + gap if x < 0 else c.x() - gap - w
+            out[name] = (c, QRectF(left, c.y() - h / 2, w, h))
+        return out
+
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.fillRect(self.rect(), QColor(250, 250, 250))
-        bw, bh = self.board_mm[0] / 1000, self.board_mm[1] / 1000
-        margin = 20
-        s = min((self.width() - 2 * margin) / bw, (self.height() - 2 * margin - 16) / bh)
-        cx, cy = self.width() / 2, (self.height() + 16) / 2
-
-        def pt(x, y):  # board coords (meters, y forward) -> screen (front facing up)
-            return QPointF(cx + x * s, cy - y * s)
+        bh = self.board_mm[1] / 1000
+        pt = self._pt
 
         p.setPen(QPen(QColor(90, 90, 90), 2))
         p.setBrush(QColor(235, 235, 235))
-        p.drawRoundedRect(QRectF(pt(-bw / 2, bh / 2), pt(bw / 2, -bh / 2)), 12, 12)
+        board = self.board_rect()
+        p.drawRoundedRect(board, 12, 12)
         p.setPen(QPen(QColor(200, 200, 200), 1, Qt.DashLine))
-        p.drawLine(pt(-bw / 2, 0), pt(bw / 2, 0))
-        p.drawLine(pt(0, -bh / 2), pt(0, bh / 2))
-        sx, sy = self.sensor_mm[0] / 2000, self.sensor_mm[1] / 2000
+        p.drawLine(QPointF(board.left(), board.center().y()), QPointF(board.right(), board.center().y()))
+        p.drawLine(QPointF(board.center().x(), board.top()), QPointF(board.center().x(), board.bottom()))
         p.setPen(QColor(120, 120, 120))
-        for name, (x, y) in {"TL": (-sx, sy), "TR": (sx, sy), "BL": (-sx, -sy), "BR": (sx, -sy)}.items():
+        for name, (c, r) in self.sensor_layout(QFontMetricsF(p.font())).items():
             p.setBrush(QColor(150, 150, 150))
-            p.drawEllipse(pt(x, y), 5, 5)
-            p.drawText(pt(x, y) + QPointF(-8, -9 if y > 0 else 20), name)
+            p.drawEllipse(c, self.SENSOR_DOT_PX, self.SENSOR_DOT_PX)
+            p.drawText(r, Qt.AlignCenter, name)
         p.drawText(QPointF(8, 14), "Front ↑ = TL/TR edge (opposite the power button)")
         p.drawText(pt(0, -bh / 2) + QPointF(-40, 14), "power button")
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -324,16 +325,35 @@ def load_pose2sim_toml(path: str | Path) -> list[CameraCalibration]:
     return cams
 
 
-def save_pose2sim_toml(path: str | Path, cams: list[CameraCalibration]) -> list[str]:
+def pose2sim_camera_order(names) -> list[str]:
+    """Camera names in the order in which Pose2Sim pairs them with Calib.toml: Pose2Sim sorts the
+    pose folders ``<camera>_json`` by the last number in the folder name (names without a number
+    last, alphabetically; ``common.sort_stringlist_by_last_number``) and takes the cameras of
+    Calib.toml in file order, without matching names. E.g. cam10, cam2, side, front ->
+    cam2, cam10, front, side."""
+    def key(name):
+        folder = f"{name}_json"
+        numbers = re.findall(r"\d+", folder)
+        return (False, int(numbers[-1]), "") if numbers else (True, 0, folder)
+
+    return sorted((str(n) for n in names), key=key)
+
+
+def save_pose2sim_toml(path: str | Path, cams: list[CameraCalibration],
+                       pose2sim_order: bool = True) -> list[str]:
     """Write a Pose2Sim Calib.toml. Cameras without extrinsics are skipped (Pose2Sim needs a
-    camera pose for every camera). Returns warnings (skipped cameras, dropped k3); raises
-    ValueError if no camera has extrinsics."""
+    camera pose for every camera). With ``pose2sim_order`` the cameras are written in
+    ``pose2sim_camera_order``, so each matches its ``<camera>_json`` pose folder. Returns
+    warnings (skipped cameras, dropped k3); raises ValueError if no camera has extrinsics."""
     def arr(a):
         return "[ " + ", ".join(repr(float(x)) for x in np.ravel(a)) + ",]"
 
     warnings = []
     skipped = [c.name for c in cams if not c.has_extrinsics]
     cams = [c for c in cams if c.has_extrinsics]
+    if pose2sim_order:
+        rank = {n: i for i, n in enumerate(pose2sim_camera_order([c.name for c in cams]))}
+        cams = sorted(cams, key=lambda c: rank[c.name])
     if skipped:
         warnings.append(f"Not exported (no extrinsics): {', '.join(skipped)}")
     if not cams:

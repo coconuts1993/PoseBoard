@@ -14,7 +14,9 @@ Output folder layout::
         wii.csv                 ~100 Hz: four sensors in kg, total weight, COP (board + world coords)
         pose3d.csv              one row per pose frame: keypoint world coordinates + COM
         pose2d_cam0.csv         2D keypoints (pixels) of the subject in each processed frame of cam0
-        pose2d_json/cam0/       optional: OpenPose-format JSON per processed frame (for Pose2Sim)
+        pose2d_json/cam0/       optional: OpenPose-format JSON per pose, for Pose2Sim
+                                (cam0_<set:06d>_keypoints.json; sets.csv maps set -> frames/times;
+                                Calib.toml of the recorded cameras)
         events.csv              event markers added during the recording (e.g. "sync" jumps)
         cam0.mkv, cam0_timestamps.csv
         fused.csv               written after stop: force data interpolated at pose timestamps + COM/COP
@@ -34,7 +36,7 @@ from pathlib import Path
 
 import numpy as np
 
-from poseboard.calibration import CameraCalibration
+from poseboard.calibration import CameraCalibration, pose2sim_camera_order, save_pose2sim_toml
 from poseboard.camera import VIDEO_EXT, CameraStream
 from poseboard.fusion import cop_to_world
 from poseboard.geometry import BoardGeometry, BoardPose
@@ -49,6 +51,7 @@ WII_HEADER = ["t", "t_rel", "t_unix", "TR_kg", "BR_kg", "TL_kg", "BL_kg", "total
               "cop_x_board", "cop_y_board", "cop_x_world", "cop_y_world", "cop_z_world"]
 EVENTS_HEADER = ["t", "t_rel", "t_unix", "label"]
 POSE2D_JSON_DIR = "pose2d_json"
+JSON_SETS_CSV = "sets.csv"  # in POSE2D_JSON_DIR: set number -> pose time, video frames, times
 FLUSH_INTERVAL_S = 1.0  # CSV files are flushed about once per second (little loss on a crash)
 
 
@@ -158,13 +161,27 @@ def iso_time(t_unix: float) -> str:
 class SessionRecorder:
     """Writes one recording session (see the module docstring for the folder layout).
 
-    ``save_openpose_json``: also write the subject's 2D keypoints of every processed camera
-    frame as OpenPose JSON (``pose2d_json/<cam>/<cam>_<frame:012d>_keypoints.json``), so the
-    recording can be re-triangulated offline with Pose2Sim."""
+    ``save_pose2d``: write the subject's 2D keypoints of every processed camera frame to
+    ``pose2d_<cam>.csv`` (default on). ``save_openpose_json``: also write them as OpenPose JSON,
+    so the recording can be re-triangulated offline with Pose2Sim (needs ``save_pose2d``):
 
-    def __init__(self, root: str | Path = "recordings", save_openpose_json: bool = False):
+    * ``pose2d_json/<cam>/<cam>_<set:06d>_keypoints.json``: one "set" per pose with a new video
+      frame of at least one recorded camera. Every recorded camera gets a file in every set
+      (an empty ``people`` list when its frame for that pose was not new, not in its video or
+      not processed), so the set numbers run 0, 1, 2, ... without gaps in every folder and
+      the same number is the same pose in all of them, which is how Pose2Sim pairs the files.
+      The cameras are those passed to ``start`` (without camera streams: the cameras of the
+      first pose).
+    * ``pose2d_json/sets.csv``: set -> pose time (t, t_rel, t_unix) and each camera's video
+      frame number and capture time (empty when its file has no person).
+    * ``pose2d_json/Calib.toml``: the recorded cameras with extrinsics, in the order in which
+      Pose2Sim sorts ``<cam>_json`` folders (``pose2sim_camera_order``)."""
+
+    def __init__(self, root: str | Path = "recordings", save_openpose_json: bool = False,
+                 save_pose2d: bool = True):
         self.root = Path(root)
         self.save_openpose_json = bool(save_openpose_json)
+        self.save_pose2d = bool(save_pose2d)
         self.folder: Path | None = None
         self.t0: float | None = None
         self.t0_unix: float | None = None
@@ -180,9 +197,20 @@ class SessionRecorder:
         self._flushed = {"wii": 0.0, "pose": 0.0, "pose2d": 0.0}
         # camera -> [file, csv writer, keypoint names of the header]
         self._pose2d: dict[str, list] = {}
+        self._pose2d_on = True  # pose2d_<cam>.csv enabled for the running recording
         self._json = False  # OpenPose JSON enabled for the running recording
+        self._json_last: dict[str, int] = {}  # camera -> last video frame written as JSON
+        self._json_cams: list[str] | None = None  # cameras with a JSON folder (fixed per recording)
+        self._json_missing_logged: set[str] = set()
+        # camera -> perf_counter time when its video writer was open: frames captured later
+        # are in the video (earlier ones, just after t0, may not be)
+        self._video_started: dict[str, float] = {}
         self._json_skip_logged = False
+        self._sets_file = self._sets_csv = None
         self._lock = threading.Lock()
+        # wii.csv has its own lock, so the Wii reader thread (whose samples are stamped when they
+        # are read) never waits for the pose / JSON / events output
+        self._wii_lock = threading.Lock()
         self._post_thread: threading.Thread | None = None
         self.meta: dict = {}
         self.counts = {"wii": 0, "pose": 0, "events": 0}
@@ -212,15 +240,16 @@ class SessionRecorder:
               force: ForceSource | None, board: BoardPose | None, geometry: BoardGeometry,
               pose_backend: str | None, subject: str = "", notes: str = "",
               pose_backend_key: str | None = None, keypoint_format: str | None = None,
-              pose_info: dict | None = None, save_openpose_json: bool | None = None) -> Path:
+              pose_info: dict | None = None, save_openpose_json: bool | None = None,
+              save_pose2d: bool | None = None) -> Path:
         """Start recording. ``cams`` may be empty (Wii-only) and ``force`` may be None
         (pose/video only).
 
         ``pose_backend``: a label of the pose source (None: no pose); ``pose_backend_key``: the
         backend key (``poseboard.pose.detectors.BACKENDS``); ``keypoint_format``: its keypoint
         format key (else taken from the first pose); ``pose_info``: more details for
-        session.json (e.g. ``MultiViewEstimator.info()``); ``save_openpose_json`` overrides
-        the recorder's setting for this recording."""
+        session.json (e.g. ``MultiViewEstimator.info()``); ``save_pose2d`` and
+        ``save_openpose_json`` override the recorder's settings for this recording."""
         if self.recording:
             raise RuntimeError("Already recording")
         t0, t0_unix = capture_clock_offset()
@@ -233,9 +262,14 @@ class SessionRecorder:
         self._pose_names = None
         self._pose_names_warned = False
         self._pose2d = {}
-        self._json = bool(self.save_openpose_json if save_openpose_json is None
-                          else save_openpose_json)
+        self._pose2d_on = bool(self.save_pose2d if save_pose2d is None else save_pose2d)
+        self._json = self._pose2d_on and bool(
+            self.save_openpose_json if save_openpose_json is None else save_openpose_json)
         self._json_skip_logged = False
+        self._json_last = {}
+        self._json_missing_logged = set()
+        self._video_started = {}
+        self._json_cams = pose2sim_camera_order([c.name for c in cams]) if cams else None
         self.t0, self.t0_unix = t0, t0_unix
         self.clock_offset_unix = t0_unix - t0
         self.meta = {
@@ -265,18 +299,27 @@ class SessionRecorder:
             "keypoint_format": None,
             "pose2sim_model": None,
             "pose_info": pose_info,
-            "pose2d": {"csv": "pose2d_<camera>.csv", "cameras": [],
+            "pose2d": {"csv": "pose2d_<camera>.csv" if self._pose2d_on else None, "cameras": [],
                        "openpose_json": self._json,
                        "json_dir": POSE2D_JSON_DIR if self._json else None,
+                       "json_files": ("<camera>/<camera>_<set:06d>_keypoints.json" if self._json
+                                      else None),
+                       "json_sets_csv": (f"{POSE2D_JSON_DIR}/{JSON_SETS_CSV}" if self._json
+                                         else None),
+                       "json_cameras": self._json_cams if self._json else None,
+                       "calib_toml": None,
                        "json_sets_written": 0, "json_sets_skipped": 0},
         }
         self._set_format_locked(keypoint_format)
+        if self._json:
+            self._write_calib_toml(folder, cams, calibrations)
 
         started: list[CameraStream] = []
         try:
             for c, st in zip(cams, self.meta["streams"]):
                 path = c.start_recording(folder / f"{c.name}{VIDEO_EXT}",
                                          clock_offset_unix=self.clock_offset_unix, t0=t0)
+                self._video_started[c.name] = time.perf_counter()
                 st["video"] = Path(path).name
                 started.append(c)
         except Exception:
@@ -286,9 +329,9 @@ class SessionRecorder:
         self._write_meta(folder)
         with self._lock:
             self.folder = folder
-            if force is not None:
-                self._open_wii_csv()
         if force is not None:
+            with self._wii_lock:
+                self._open_wii_csv()
             self.log_force_source(force, "start")
             force.add_listener(self._on_force)
         return folder
@@ -301,13 +344,39 @@ class SessionRecorder:
         fmt = FORMATS.get(key)
         self.meta["pose2sim_model"] = fmt.pose2sim_model if fmt is not None else None
 
+    def _write_calib_toml(self, folder: Path, cams: list[CameraStream],
+                          calibrations: dict[str, CameraCalibration]) -> None:
+        """pose2d_json/Calib.toml for Pose2Sim: the recorded cameras (all calibrations without
+        camera streams) that have extrinsics, in Pose2Sim's folder order."""
+        names = [c.name for c in cams] if cams else list(calibrations)
+        calibs = [calibrations[n] for n in names if n in calibrations]
+        missing = [n for n in names if n not in calibrations]
+        notes = [f"Not exported (no calibration): {', '.join(missing)}"] if missing else []
+        if not any(c.has_extrinsics for c in calibs):
+            self.meta["pose2d"]["calib_toml_note"] = ("not written: no recorded camera has "
+                                                     "extrinsics")
+            return
+        d = folder / POSE2D_JSON_DIR
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            notes += save_pose2sim_toml(d / "Calib.toml", calibs)
+        except Exception as e:  # noqa: BLE001  (never stop a recording for this)
+            log.exception("writing Calib.toml failed")
+            self.meta["pose2d"]["calib_toml_note"] = f"not written: {e}"
+            return
+        self.meta["pose2d"]["calib_toml"] = f"{POSE2D_JSON_DIR}/Calib.toml"
+        self.meta["pose2d"]["calib_toml_cameras"] = pose2sim_camera_order(
+            [c.name for c in calibs if c.has_extrinsics])
+        if notes:
+            self.meta["pose2d"]["calib_toml_note"] = "; ".join(notes)
+
     def _write_meta(self, folder: Path) -> None:
         (folder / "session.json").write_text(
             json.dumps(self.meta, indent=2, ensure_ascii=False, default=_json_default),
             encoding="utf-8")
 
     def _open_wii_csv(self) -> None:
-        # caller holds self._lock
+        # caller holds self._wii_lock
         if self._wii_csv is None and self.folder is not None:
             self._wii_file = open(self.folder / "wii.csv", "w", newline="")
             self._wii_csv = csv.writer(self._wii_file)
@@ -326,7 +395,8 @@ class SessionRecorder:
                 return
             self._force = force
             if force is not None:
-                self._open_wii_csv()
+                with self._wii_lock:
+                    self._open_wii_csv()
                 self.meta["has_wii"] = True
                 self.meta["force_source"] = force.info()
         if force is not None:
@@ -353,7 +423,8 @@ class SessionRecorder:
 
     # ------------------------------------------------------------ callbacks
     def _on_force(self, s: ForceSample) -> None:
-        with self._lock:
+        # Wii reader thread: only the wii.csv lock, never the one of the pose output
+        with self._wii_lock:
             if self._wii_csv is None:
                 return
             cw = (cop_to_world(self._board, s.cop_board)
@@ -366,7 +437,7 @@ class SessionRecorder:
             self._maybe_flush("wii", self._wii_file, s.t)
 
     def _maybe_flush(self, key: str, fh, t: float) -> None:
-        # caller holds self._lock
+        # caller holds the lock of that file (self._wii_lock for wii.csv, else self._lock)
         if t - self._flushed[key] >= FLUSH_INTERVAL_S:
             fh.flush()
             self._flushed[key] = t
@@ -420,7 +491,7 @@ class SessionRecorder:
             self._pose_csv.writerow(row)
             self.counts["pose"] += 1
             self._maybe_flush("pose", self._pose_file, pose.t)
-            if pose.per_camera_2d or getattr(pose, "camera_frames", None):
+            if self._pose2d_on and (pose.per_camera_2d or getattr(pose, "camera_frames", None)):
                 self._write_pose2d_locked(pose)
 
     # ------------------------------------------------------------ 2D keypoints
@@ -467,11 +538,7 @@ class SessionRecorder:
         names = list(pose.names)
         frames = dict(getattr(pose, "camera_frames", None) or {})
         cams = list(frames) + [c for c in pose.per_camera_2d if c not in frames]
-        # Cameras whose video is recorded (all processed cameras when the recorder has no camera
-        # streams, e.g. offline processing with known frame numbers)
-        recorded = {c.name for c in self._cams} if self._cams else set(cams)
-        json_set: dict[str, tuple[int, Pose2D | None]] = {}
-        json_ok = self._json
+        entries: dict[str, tuple[float, int | None, Pose2D | None]] = {}
         for cam in cams:
             p2 = pose.per_camera_2d.get(cam)
             t_cf, idx_cf = frames.get(cam, (None, None))
@@ -492,28 +559,68 @@ class SessionRecorder:
             for x, y, c in vals:
                 row += [_fp(x), _fp(y), _fp(c, 4)]
             w.writerow(row)
-            if json_ok and cam in recorded:
-                if idx is None:
-                    json_ok = False  # keep the camera folders aligned: skip the whole set
-                else:
-                    json_set[cam] = (int(idx), p2)
-        if self._json and json_set and json_ok:
-            for cam, (idx, p2) in json_set.items():
-                d = self.folder / POSE2D_JSON_DIR / cam
-                d.mkdir(parents=True, exist_ok=True)
-                (d / f"{cam}_{idx:012d}_keypoints.json").write_text(
-                    json.dumps(openpose_json(p2), separators=(",", ":")), encoding="utf-8")
-            self.meta["pose2d"]["json_sets_written"] += 1
-        elif self._json and cams and any(c in recorded for c in cams):
-            self.meta["pose2d"]["json_sets_skipped"] += 1
-            if not self._json_skip_logged:
-                self._json_skip_logged = True
-                log.info("OpenPose JSON not written for a pose whose frames are not all in the "
-                         "recorded videos (e.g. captured just before the recording started)")
+            entries[cam] = (float(t), None if idx is None else int(idx), p2)
+        if self._json and cams:
+            self._write_json_set_locked(pose, entries)
         if pose.t - self._flushed["pose2d"] >= FLUSH_INTERVAL_S:
             for fh, _, _ in self._pose2d.values():
                 fh.flush()
+            if self._sets_file is not None:
+                self._sets_file.flush()
             self._flushed["pose2d"] = pose.t
+
+    def _write_json_set_locked(self, pose: Pose3D,
+                               entries: dict[str, tuple[float, int | None, Pose2D | None]]) -> None:
+        """One OpenPose JSON file per JSON camera for this pose (see the class docstring), or
+        none at all when no camera has a new frame of its video (e.g. a pose computed from
+        frames captured before the recording started)."""
+        # caller holds self._lock
+        if self._json_cams is None:  # no camera streams: the cameras of the first pose
+            self._json_cams = pose2sim_camera_order(list(entries))
+            self.meta["pose2d"]["json_cameras"] = list(self._json_cams)
+        new: dict[str, tuple[float, int, Pose2D | None]] = {}
+        for cam in self._json_cams:
+            t, idx, p2 = entries.get(cam, (None, None, None))
+            if idx is not None and idx > self._json_last.get(cam, -1):
+                new[cam] = (t, idx, p2)
+            elif (idx is None and t is not None and t >= self._video_started.get(cam, self.t0)
+                  and cam not in self._json_missing_logged):
+                # captured after its video writer was opened, but the frame is not in its video
+                # (camera removed and added again, video writer failed, frame size changed)
+                self._json_missing_logged.add(cam)
+                log.warning("OpenPose JSON: frames of %s are not in its recorded video; its "
+                            "JSON files have no person while this lasts", cam)
+        if not new:
+            self.meta["pose2d"]["json_sets_skipped"] += 1
+            if not self._json_skip_logged:
+                self._json_skip_logged = True
+                log.info("OpenPose JSON not written for a pose without a new frame of the "
+                         "recorded videos (e.g. captured just before the recording started)")
+            return
+        n = int(self.meta["pose2d"]["json_sets_written"])
+        root = self.folder / POSE2D_JSON_DIR
+        for cam in self._json_cams:
+            d = root / cam
+            d.mkdir(parents=True, exist_ok=True)
+            p2 = new[cam][2] if cam in new else None
+            (d / f"{cam}_{n:06d}_keypoints.json").write_text(
+                json.dumps(openpose_json(p2), separators=(",", ":")), encoding="utf-8")
+            if cam in new:
+                self._json_last[cam] = new[cam][1]
+        if self._sets_csv is None:
+            self._sets_file = open(root / JSON_SETS_CSV, "w", newline="")
+            self._sets_csv = csv.writer(self._sets_file)
+            head = ["set", "t", "t_rel", "t_unix"]
+            for cam in self._json_cams:
+                head += [f"{cam}_frame", f"{cam}_t"]
+            self._sets_csv.writerow(head)
+        row = [n, f"{pose.t:.6f}", f"{pose.t - self.t0:.6f}",
+               f"{pose.t + self.clock_offset_unix:.6f}"]
+        for cam in self._json_cams:
+            t, idx, _ = new.get(cam, (None, None, None))
+            row += ["", ""] if idx is None else [idx, f"{t:.6f}"]
+        self._sets_csv.writerow(row)
+        self.meta["pose2d"]["json_sets_written"] = n + 1
 
     def add_event(self, label: str, t: float | None = None) -> dict | None:
         """Write an event marker (e.g. "sync" when the subject jumps) to events.csv.
@@ -551,10 +658,14 @@ class SessionRecorder:
             folder, self.folder = self.folder, None
             if folder is None:
                 return None
-            files = (self._wii_file, self._pose_file, self._events_file,
+            with self._wii_lock:
+                wii_file = self._wii_file
+                self._wii_file = self._wii_csv = None
+            files = (wii_file, self._pose_file, self._events_file, self._sets_file,
                      *[e[0] for e in self._pose2d.values()])
-            self._wii_file = self._wii_csv = self._pose_file = self._pose_csv = None
+            self._pose_file = self._pose_csv = None
             self._events_file = self._events_csv = None
+            self._sets_file = self._sets_csv = None
             self._pose2d = {}
         if self._force is not None:
             self._force.remove_listener(self._on_force)

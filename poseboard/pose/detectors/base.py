@@ -112,3 +112,6 @@ class BackendSpec:
     # Option names whose value is a user-supplied file path (e.g. OpenPose prototxt/caffemodel)
     needs_files: tuple[str, ...] = ()
     provides_3d: bool = False  # the detector fills Person2D.keypoints_3d (single-view 3D)
+    # Options with listed choices whose value may also be typed in (e.g. a model id or a local
+    # model folder): an editable list in the GUI
+    editable: tuple[str, ...] = ()

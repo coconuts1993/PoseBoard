@@ -139,8 +139,10 @@ class PoseEstimator:
         """frames: {camera name: (timestamp, BGR image)}; cams: {camera name: calibration}.
 
         If any camera in ``cams`` has extrinsics, return world (checkerboard) coordinates computed
-        only from cameras with extrinsics; otherwise use ``world_camera`` (default: the first
-        camera in ``cams``)."""
+        only from cameras with extrinsics; otherwise use only ``world_camera`` (the first camera
+        in ``cams`` when it is None). When ``world_camera`` is set but not in ``frames`` / ``cams``
+        (it is not running), return no 3D (None, or a pose with NaN keypoints): lifting the pose
+        in another camera's frame would mix it with the board's frame."""
         raise NotImplementedError
 
     def close(self) -> None:

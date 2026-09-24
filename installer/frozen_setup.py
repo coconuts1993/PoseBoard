@@ -1,8 +1,9 @@
 """Runtime setup shared by the frozen (PyInstaller) entry points.
 
-* Points the MediaPipe backend at the pose model bundled with the executable, or at a
-  writable ``models`` folder next to the executable if no model was bundled
-  (it is then downloaded on first use).
+* The models folder (``mediapipe_backend.MODEL_DIR``) is the writable ``models`` folder next to
+  the executable: YOLO / MoveNet downloads, OpenPose weights (``models\\openpose\\body_25``) and
+  other MediaPipe models go there, as the README describes. The MediaPipe model bundled with
+  the executable (``_internal\\models``) is found through ``BUNDLED_MODEL_DIR``.
 * Makes relative default paths (e.g. ``recordings/``) resolve next to the executable
   instead of wherever the process happened to be started from.
 """
@@ -28,7 +29,6 @@ def configure() -> None:
 
     bundled = Path(getattr(sys, "_MEIPASS", app_dir())) / "models"
     if any(bundled.glob("pose_landmarker_*.task")):
-        mediapipe_backend.MODEL_DIR = bundled
-    else:
-        mediapipe_backend.MODEL_DIR = app_dir() / "models"
+        mediapipe_backend.BUNDLED_MODEL_DIR = bundled
+    mediapipe_backend.MODEL_DIR = app_dir() / "models"
     os.chdir(app_dir())

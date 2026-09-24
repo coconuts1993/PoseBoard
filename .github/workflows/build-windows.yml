@@ -13,10 +13,11 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       QT_QPA_PLATFORM: offscreen
       PYTHONUTF8: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -24,24 +25,51 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+          cache-dependency-path: requirements*.txt
 
-      - name: Install dependencies
+      # Model files of the pose backends (rtmlib, PyTorch hub, Hugging Face, YOLO / MoveNet in
+      # models/, test downloads): kept between runs so the real-model tests do not download
+      # ~2 GB every time
+      - name: Cache pose models
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/rtmlib
+            ~/.cache/torch
+            ~/.cache/huggingface
+            ~/.cache/poseboard-tests
+            models
+          key: pose-models-${{ runner.os }}-${{ hashFiles('poseboard/pose/detectors/*.py') }}
+          restore-keys: pose-models-${{ runner.os }}-
+
+      # The exe is built from this environment: base requirements plus the torch-free rtmlib /
+      # ONNX Runtime backends. The PyTorch stack is installed only later, for the tests.
+      - name: Install dependencies (base + rtmlib / ONNX Runtime)
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install "rtmlib>=0.0.16" "onnxruntime>=1.16"
           pip install pytest pyinstaller
+          pip uninstall -y opencv-python opencv-python-headless
+          pip install --force-reinstall --no-deps opencv-contrib-python
+          pip list
+          python -c "import cv2, rtmlib, onnxruntime; print('OpenCV', cv2.__version__, '| ONNX Runtime', onnxruntime.__version__)"
+
+      # The configuration of the exe (no PyTorch, Ultralytics, transformers): "not installed"
+      # entries, clean skips of the optional backends and the registry defaults without them
+      - name: Run tests (base + rtmlib, the exe's environment)
+        run: python -m pytest -q -rs tests
 
       - name: Download MediaPipe pose model (bundled into the exe)
         run: python -c "from poseboard.pose.mediapipe_backend import ensure_model; print(ensure_model('full'))"
 
-      - name: Run tests
-        run: python -m pytest -q tests
-
-      - name: Build with PyInstaller
+      - name: Build with PyInstaller (the spec leaves out PyTorch, Ultralytics, transformers, MMPose)
         run: pyinstaller installer/poseboard.spec --noconfirm
 
-      - name: Self-test PoseBoard.exe (GUI, headless)
+      - name: Self-test PoseBoard.exe (GUI, headless; runs the real rtmlib models)
         shell: pwsh
+        env:
+          POSEBOARD_SELFTEST_DOWNLOAD: "1"
         run: |
           $p = Start-Process -FilePath dist\PoseBoard\PoseBoard.exe -ArgumentList '--selftest' -Wait -PassThru
           if (Test-Path dist\PoseBoard\poseboard.log) { Get-Content dist\PoseBoard\poseboard.log; Remove-Item dist\PoseBoard\poseboard.log }
@@ -55,6 +83,19 @@ jobs:
           $csv = Get-ChildItem -Recurse $env:RUNNER_TEMP\wii_selftest -Filter wii.csv | Select-Object -First 1
           if (-not $csv) { throw "wii.csv was not written" }
           Get-Content $csv.FullName -TotalCount 3
+
+      # All pose backends for the tests (CPU PyTorch from PyPI), so the real-model smoke tests
+      # and tests/test_backends_consistency.py run with internet access; they skip (with the
+      # reason) only when a model cannot be downloaded
+      - name: Install the optional pose backends for the tests
+        run: |
+          pip install -r requirements-extras.txt
+          pip uninstall -y opencv-python opencv-python-headless
+          pip install --force-reinstall --no-deps opencv-contrib-python
+          python -c "import cv2, torch, torchvision, ultralytics, transformers, rtmlib, onnxruntime; print('OpenCV', cv2.__version__, '| torch', torch.__version__, '| ultralytics', ultralytics.__version__, '| transformers', transformers.__version__)"
+
+      - name: Run tests (all backends)
+        run: python -m pytest -q -rs tests
 
       - name: Package
         shell: pwsh

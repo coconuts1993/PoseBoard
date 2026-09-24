@@ -5,7 +5,11 @@ camera (``select_subject``: the person on the Balance Board, else tracking, else
 person) and then, following the frame rule (camera frames are never mixed):
 
 * **triangulated**: >= 2 cameras with extrinsics see the subject: weighted DLT with iterative
-  outlier rejection per keypoint (``triangulate_robust``);
+  outlier rejection per keypoint (``triangulate_robust``). When fewer than
+  ``MIN_TRIANGULATED_KEYPOINTS`` keypoints are seen confidently by two cameras and the detector
+  gives a 3D skeleton, the single-view lift of the camera with the most confident keypoints is
+  used instead (with a note); with no triangulated keypoint at all and no 3D skeleton the pose
+  is ``2d_only``;
 * **single_view_3d**: one usable camera and a detector that gives a metric body-centred 3D
   skeleton (``Person2D.keypoints_3d``, e.g. MediaPipe): the skeleton is placed with PnP
   (``single_view_lift``);
@@ -14,7 +18,8 @@ person) and then, following the frame rule (camera frames are never mixed):
 
 If any camera has extrinsics the world frame is the floor checkerboard and only cameras with
 extrinsics are used for 3D; otherwise the world frame is the camera frame of ``world_camera``
-(the camera the board was registered with) and only that camera is used.
+(the camera the board was registered with) and only that camera is used: when it is not
+running the pose is ``2d_only``, never lifted in another camera's frame.
 """
 
 from __future__ import annotations
@@ -38,14 +43,18 @@ from poseboard.pose.triangulation import triangulate_robust
 log = logging.getLogger(__name__)
 
 SMOOTHING = (None, "one_euro")
+# Fewer triangulated keypoints than this: use the single-view 3D skeleton instead, if any
+MIN_TRIANGULATED_KEYPOINTS = 6
 
 
 def world_view(cams: dict[str, CameraCalibration], world_camera: str | None = None) -> str | None:
     """None if the world frame is the checkerboard (some camera has extrinsics); otherwise the
-    camera whose frame is the world frame: ``world_camera`` if given, else the first camera."""
+    camera whose frame is the world frame: ``world_camera`` when set (even if it is not in
+    ``cams``: the board and the COP are in its frame, so no other camera may be used), else the
+    first camera (no board registered)."""
     if any(c.has_extrinsics for c in cams.values()):
         return None
-    if world_camera in cams:
+    if world_camera is not None:
         return world_camera
     return next(iter(cams), None)
 
@@ -212,13 +221,15 @@ class MultiViewEstimator(PoseEstimator):
         for name, (t, img) in frames.items():
             people = self._detect(name, t, img)
             poly = None
-            if len(people) > 1 and board is not None and name in cams:
+            if people and board is not None and name in cams:
                 poly = board_polygon_px(board, cams[name], geo)
             subj = select_subject(people, board_polygon_px=poly,
                                   previous_bbox=st.prev_bbox.get(name), fmt=fmt)
             if subj is None:
                 st.prev_bbox.pop(name, None)
-                notes.append(f"{name}: no person detected")
+                notes.append(f"{name}: no person detected" if not people else
+                             f"{name}: nobody detected on the board (a person off the board "
+                             "was ignored)")
                 continue
             if len(subj.keypoints) != K:
                 raise ValueError(f"{self.name}: the detector returned {len(subj.keypoints)} "
@@ -246,6 +257,7 @@ class MultiViewEstimator(PoseEstimator):
                                  "floor checkerboard)")
             if len(calibrated) >= 2:
                 result = self._triangulate(calibrated, dets, frames, cams, notes)
+                result = self._check_triangulation(result, calibrated, dets, frames, cams, notes)
             elif calibrated:
                 result = self._single_view(calibrated[0], dets, frames, cams, notes)
             else:
@@ -257,6 +269,9 @@ class MultiViewEstimator(PoseEstimator):
                                  f"the camera frame of {wv}")
             if wv in dets:
                 result = self._single_view(wv, dets, frames, cams, notes)
+            elif wv not in cams:
+                notes.append(f"the world camera {wv} (the camera the board was registered "
+                             "with) is not running: 2D only")
             else:
                 notes.append(f"the world camera {wv} does not see the subject: 2D only")
 
@@ -295,6 +310,26 @@ class MultiViewEstimator(PoseEstimator):
             notes.append("no keypoint was seen confidently by two cameras")
         t = float(np.mean([frames[n][0] for n in calibrated]))
         return MODE_TRIANGULATED, tri.points, tri.scores, views, err, t
+
+    def _check_triangulation(self, result, calibrated, dets, frames, cams, notes):
+        """Too few triangulated keypoints: the single-view lift of the camera with the most
+        confident keypoints (detectors with a 3D skeleton), else ``2d_only`` (None) when no
+        keypoint could be triangulated."""
+        n_ok = int(np.all(np.isfinite(result[1]), axis=1).sum())
+        if n_ok >= MIN_TRIANGULATED_KEYPOINTS:
+            return result
+        if self.provides_3d:
+            def confident(n):
+                sc = np.nan_to_num(np.asarray(dets[n].scores, np.float64))
+                return int((sc >= self.min_score).sum()), float(sc.sum())
+
+            best = max(calibrated, key=confident)
+            single = self._single_view(best, dets, frames, cams, notes)
+            if single is not None:
+                notes.append(f"only {n_ok} keypoints seen confidently by two cameras: "
+                             f"single-view 3D from {best}")
+                return single
+        return None if n_ok == 0 else result  # nothing triangulated: 2D only
 
     def _single_view(self, name, dets, frames, cams, notes):
         p = dets[name]

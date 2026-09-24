@@ -3,6 +3,7 @@ readers, COM keypoint aliases, calibration I/O and the pose backend's world fram
 
 import csv
 import logging
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -238,6 +239,22 @@ def test_com_minimum_keypoints_and_log(caplog):
 
 
 # ------------------------------------------------------------------ calibration
+def test_pose2sim_export_follows_pose2sims_folder_order(tmp_path):
+    """Pose2Sim pairs Calib.toml sections (file order) with the <camera>_json folders sorted by
+    their last number (else alphabetically), never by name."""
+    from poseboard.calibration import pose2sim_camera_order
+
+    names = ["side", "cam10", "cam1", "front", "cam2", "cam0"]
+    assert pose2sim_camera_order(names) == ["cam0", "cam1", "cam2", "cam10", "front", "side"]
+    cams = [make_cam(n, [0.3 * i, -1.0, 1.0]) for i, n in enumerate(names)]
+    save_pose2sim_toml(tmp_path / "Calib.toml", cams)
+    back = load_calibrations(tmp_path / "Calib.toml")
+    assert [c.name for c in back] == ["cam0", "cam1", "cam2", "cam10", "front", "side"]
+    np.testing.assert_allclose(back[3].tvec, cams[1].tvec)  # cam10 keeps its own pose
+    save_pose2sim_toml(tmp_path / "as_given.toml", cams, pose2sim_order=False)
+    assert [c.name for c in load_calibrations(tmp_path / "as_given.toml")] == names
+
+
 def test_pose2sim_export_skips_uncalibrated_and_zero_pose_import(tmp_path):
     a = make_cam("a", [0, -1, 1])
     a.dist = np.array([0.1, -0.05, 0, 0, 0.4])
@@ -341,6 +358,36 @@ def test_model_download_error_names_url_and_path(tmp_path, monkeypatch):
     msg = str(e.value)
     assert mpb.MODEL_URLS["lite"] in msg and str(tmp_path / "models" / "pose_landmarker_lite.task") in msg
     assert not list((tmp_path / "models").glob("*.part"))
+
+
+def test_frozen_app_uses_the_models_folder_next_to_the_exe(tmp_path, monkeypatch):
+    """Packaged exe: downloads and hand-placed model files (YOLO, MoveNet, OpenPose) go to the
+    writable models folder next to PoseBoard.exe, as the README says; the bundled MediaPipe
+    model in _internal/models is still found."""
+    import importlib
+    import sys
+
+    from poseboard.pose.detectors import movenet_det, openpose_dnn_det, ultralytics_det
+
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "installer"))
+    frozen_setup = importlib.import_module("frozen_setup")
+    exe_dir = tmp_path / "PoseBoard"
+    bundled = exe_dir / "_internal" / "models"
+    bundled.mkdir(parents=True)
+    (bundled / "pose_landmarker_full.task").write_bytes(b"bundled model")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(exe_dir / "_internal"), raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe_dir / "PoseBoard.exe"))
+    monkeypatch.setattr(mpb, "MODEL_DIR", mpb.MODEL_DIR)  # restored after the test
+    monkeypatch.setattr(mpb, "BUNDLED_MODEL_DIR", None)
+    monkeypatch.chdir(tmp_path)
+    frozen_setup.configure()
+    assert Path(mpb.MODEL_DIR) == exe_dir / "models" and Path.cwd() == exe_dir.resolve()
+    assert Path(mpb.BUNDLED_MODEL_DIR) == bundled
+    assert mpb.ensure_model("full") == bundled / "pose_landmarker_full.task"  # no download
+    assert mpb.model_path("heavy") == exe_dir / "models" / "pose_landmarker_heavy.task"
+    assert openpose_dnn_det.models_dir() == exe_dir / "models" / "openpose"
+    assert movenet_det.models_dir() == ultralytics_det.models_dir() == exe_dir / "models"
 
 
 def test_check_pose3d_rejects_bad_plugin_output():

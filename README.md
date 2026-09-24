@@ -6,8 +6,9 @@ PoseBoard is a Windows desktop app (Python, PySide6, OpenCV) for balance and pos
 research. It records:
 
 * **force and center of pressure (COP)** from a Nintendo Wii Balance Board over Bluetooth, and
-* **video and 3D body keypoints** from one or more ordinary webcams (MediaPipe built in, or
-  your own model such as PoseAssess through a plugin),
+* **video and 3D body keypoints** from one or more ordinary webcams (MediaPipe built in;
+  optional backends such as RTMPose, YOLO pose, ViTPose, Keypoint R-CNN, OpenPose or MoveNet;
+  or your own model such as PoseAssess through a plugin),
 
 stamps every sample with the same high-resolution clock (`time.perf_counter`), and places the
 board, the COP, the skeleton and the whole-body **center of mass (COM)** in a single metric
@@ -42,13 +43,14 @@ recordings from other programs (your own 3D pose app, the original Wii app, EMG,
 9. [Output files](#output-files)
 10. [Post-processing CLI](#post-processing-cli)
 11. [Aligning with other recordings](#aligning-with-other-recordings)
-12. [Integrating PoseAssess (or any other 3D pose tool)](#integrating-poseassess-or-any-other-3d-pose-tool)
-13. [Accuracy: single camera vs. multiple cameras](#accuracy-single-camera-vs-multiple-cameras)
-14. [Limitations](#limitations)
-15. [Troubleshooting](#troubleshooting)
-16. [Running the tests](#running-the-tests)
-17. [Project layout](#project-layout)
-18. [References](#references)
+12. [2D pose backends](#2d-pose-backends)
+13. [Integrating PoseAssess (or any other 3D pose tool)](#integrating-poseassess-or-any-other-3d-pose-tool)
+14. [Accuracy: single camera vs. multiple cameras](#accuracy-single-camera-vs-multiple-cameras)
+15. [Limitations](#limitations)
+16. [Troubleshooting](#troubleshooting)
+17. [Running the tests](#running-the-tests)
+18. [Project layout](#project-layout)
+19. [References](#references)
 
 ---
 
@@ -84,9 +86,17 @@ recordings from other programs (your own 3D pose app, the original Wii app, EMG,
   board is then fitted flat on the floor (position and heading only), which avoids a tilt
   from click noise. Mirrored click orders are refused, and a **Corner Check** (press one corner)
   verifies the orientation against the sensors.
-* **3D pose**: MediaPipe Pose Landmarker (lite/full/heavy). One camera: MediaPipe's metric
-  skeleton is placed in the world with PnP. Two or more cameras: weighted triangulation.
-  **Plugin interface** for your own estimator, and **offline import** of TRC/CSV files.
+* **3D pose from any of 13 2D pose backends**: MediaPipe Pose Landmarker (built in), RTMPose,
+  RTMW / DWPose, RTMO, ViTPose and RTMPose3D (rtmlib), YOLO pose (Ultralytics), Keypoint R-CNN
+  (torchvision), ViTPose (transformers), OpenPose (OpenCV DNN), MMPose and MoveNet. Two or more
+  calibrated cameras: weighted triangulation with outlier rejection. One camera: the metric
+  skeleton of MediaPipe / RTMPose3D placed in the world with PnP, otherwise 2D only. The person
+  standing on the board is picked when several people are in view. See
+  [2D pose backends](#2d-pose-backends). **Plugin interface** for your own estimator, and
+  **offline import** of TRC/CSV files.
+* **2D keypoints for offline work**: the subject's 2D keypoints of every processed frame, with
+  the video frame number (`pose2d_<camera>.csv`), and optionally OpenPose JSON files to
+  re-triangulate the recording with Pose2Sim.
 * **Center of mass** from 3D keypoints with Winter's segment table; works with MediaPipe,
   COCO, Halpe/Pose2Sim/OpenPose-style names.
 * **Live view**: board outline, sensors and axes, COP marker and force arrow, skeleton and
@@ -136,8 +146,17 @@ see below) and the MediaPipe *full* model, so pose estimation works offline.
   `C:\Program Files`: the exe works in its own folder, so `recordings\` and relative paths such
   as `--out` end up next to the exe.
 * The plugin template is inside the package (`_internal\plugins`, which the **...** button
-  opens). Plugins that need extra Python packages (PyTorch, ONNX Runtime, ...) do **not** work
-  with the packaged build: use the source install below.
+  opens). Plugins that need extra Python packages (PyTorch, ...) do **not** work with the
+  packaged build: use the source install below.
+* The **`models\`** folder next to `PoseBoard.exe` (created when needed) is the models folder of
+  the packaged build: YOLO / MoveNet downloads and the OpenPose weights
+  (`models\openpose\body_25\`, `models\openpose\coco\`) go there, and the "..." buttons of the
+  model file fields open it. The bundled MediaPipe *full* model stays in `_internal\models`;
+  the *lite* / *heavy* models are downloaded into `models\`.
+* Pose backends in the packaged build: MediaPipe, the rtmlib backends (RTMPose, RTMW / DWPose,
+  RTMO, ViTPose ONNX, RTMPose3D; ONNX Runtime is included), MoveNet and OpenPose (OpenCV DNN).
+  The PyTorch-based ones (YOLO pose, Keypoint R-CNN, ViTPose transformers) and MMPose are not
+  included (several GB) and are shown as *not installed*: use the source install for them.
 
 ### Option 1 - from source
 
@@ -187,6 +206,16 @@ Dependencies (`requirements.txt`): `numpy`, `opencv-contrib-python` (the OpenCV 
 MediaPipe itself depends on; installing `opencv-python` as well would give two copies of
 `cv2`), `PySide6`, `hidapi`, `mediapipe`, and `tomli` on Python 3.10. For tests:
 `python -m pip install -r requirements-dev.txt`.
+
+**Optional pose backends** (RTMPose, YOLO pose, ViTPose, Keypoint R-CNN, ...): install
+`requirements-extras.txt`, or only the ones you need, and then restore a single OpenCV build
+(see [Installing the extra backends on Windows](#installing-the-extra-backends-on-windows)):
+
+```bat
+.venv\Scripts\python -m pip install -r requirements-extras.txt
+.venv\Scripts\python -m pip uninstall -y opencv-python opencv-python-headless
+.venv\Scripts\python -m pip install --force-reinstall --no-deps opencv-contrib-python
+```
 
 ---
 
@@ -408,13 +437,48 @@ If you change the board dimensions, click **Compute Board Pose** again.
 
 ### Tab 4 - Record
 
-1. **3D Pose Estimation** (optional): choose **MediaPipe (full / lite / heavy)** or
-   **Plugin (.py)** (select the file with "..."), then **Start Pose Estimation**. The label
-   shows the pose rate, "(no person detected)" when nobody is found, the last error (cleared
-   by the next good frame) and **STOPPED** if the pose thread ended. The skeleton and COM are
-   drawn on the video; the COM projection appears in the top-down view. A camera whose newest
-   frame is much older than the others' (it stopped delivering) is left out of the pose. The
-   backend cannot be changed while recording.
+1. **3D Pose Estimation** (optional):
+   * **Backend**: every 2D pose backend of PoseBoard is listed (see
+     [2D pose backends](#2d-pose-backends)); backends whose packages are missing are greyed out
+     and marked *(not installed)*, and their tooltip names the `pip install` command. The line
+     below the list shows the keypoint format of the selected options (e.g. OpenPose BODY_25 or
+     COCO-18), whether one camera is enough for 3D, the license and notes. **Plugin (.py)** runs
+     your own estimator (select the file with "...").
+   * The backend's **options** follow: model / size / mode, **Device** (`auto` = the NVIDIA GPU
+     when the backend can use it), and file fields with "..." for model files you supply
+     (OpenPose prototxt and caffemodel, a MoveNet `.onnx`, Keypoint R-CNN weights, and for the
+     rtmlib backends a **Pose model file** / **Person detector file**, `.onnx` or the mmdeploy
+     `.zip`; empty = the default model of the mode). The **Model** list of ViTPose
+     (transformers) and MMPose also takes a typed value: a Hugging Face id or MMPose model name,
+     or a local model folder. The values are remembered per backend and saved in the project
+     file.
+   * **Min keypoint confidence** (per backend; scores differ between models): keypoints below it
+     are not used for 3D and not drawn. **Reprojection outlier threshold (px)**: with 2+
+     cameras, a camera whose keypoint does not fit the others by more than this is dropped for
+     that keypoint. **Temporal smoothing (One-Euro)** reduces jitter. **Pick the person standing
+     on the board** (default on): with several people in view, the one whose feet are on the
+     registered board is used (see [Which person is the subject](#which-person-is-the-subject)).
+     These can be changed while pose estimation runs or loads (values changed while the model
+     loads are applied once it is ready).
+   * **Save 2D keypoints** writes `pose2d_<camera>.csv`, **Also save OpenPose JSON (Pose2Sim)**
+     the JSON files (see [Output files](#output-files)).
+   * **Start Pose Estimation**: the model is loaded in the background (the first start of a
+     backend downloads its model files, which can take minutes; the status line shows
+     "Loading ..." and the window stays usable). **Stop** abandons the start at once: a download
+     that is running finishes in the background, and the next **Start** waits for it (the
+     status line says "waiting for the previous model load to finish"), so two model loads
+     never write the same files. Stop never blocks the window, also not while a slow backend
+     is processing a frame. A failure (e.g. a blocked download, or a plugin that exits) is shown
+     in a message that says where to put the file by hand.
+   * The status line shows the pose rate, how the 3D pose was obtained (**triangulated from N
+     views**, **single-view 3D**, or **2D only**), the mean reprojection error and notes such
+     as `cam1 not used for 3D: no extrinsics (the world frame is the floor checkerboard)`,
+     "no person detected", errors (cleared by the next good frame) and **STOPPED** if the pose
+     thread ended. The 2D skeleton of the backend's format is drawn on the video of every camera
+     (also in 2D-only mode; left side blue, right side orange) with the mode at the bottom left;
+     the COM and its projection appear when 3D is available. A camera whose newest frame is much
+     older than the others' (it stopped delivering) is left out of the pose. The backend and its
+     options cannot be changed while pose estimation or a recording runs.
 2. **Recording**: enter **Subject** and **Notes**, choose the **Output folder** (default
    `recordings/`) and click **Start Recording**. The **Streams** line shows what will be
    recorded, e.g. `cam0, cam1, pose, Wii`, `Wii not connected — recording video/pose only`,
@@ -548,13 +612,13 @@ so a crash loses at most the last second.
 
 | File | Content |
 |---|---|
-| `session.json` | Metadata: `created`, `subject`, `notes`, `clock` (description), **clock fields** `t0`, `t0_unix`, `clock_offset_unix`, `start_time_iso`, and at stop `t_stop`, `t_stop_unix`, `stop_time_iso`, `duration_s`; **stream flags** `has_wii`, `has_pose`, `has_video`, `camera_names`; `world_frame`, `board_geometry`, `board_pose` (`board_to_world` R/t, `method` pnp/triangulation, `reproj_error_px`, `floor_constrained`, `tilt_deg`, `world_camera` (camera whose frame is the world when no extrinsics were set), `warnings`, `notes`; `null` if not registered), `cameras` (the calibrations used for the recorded cameras), `streams` (name, source, fps, video file), `force_source` (at the end of the recording: type, tare, COP min. load, sensor spacing, board calibration, battery, device path; for auto-connect also the number of connections/disconnects; `null` without a board), `force_source_history` (device and tare in effect from each start/connection, with `t_rel`), `pose_backend` (label of the pose source), `pose_backend_key` (backend key, e.g. `mediapipe`), `keypoint_format` (e.g. `coco17`, `halpe26`, `mediapipe33`) and `pose2sim_model` (the matching Pose2Sim `pose_model`, e.g. `COCO_17`, `HALPE_26`, `BLAZEPOSE`), `pose_info` (backend details, if known), `pose2d` (`cameras` with a `pose2d_<camera>.csv`, `openpose_json`, `json_dir`, `json_sets_written`, `json_sets_skipped`), `samples` (counts of `wii`, `pose`, `events` rows). |
+| `session.json` | Metadata: `created`, `subject`, `notes`, `clock` (description), **clock fields** `t0`, `t0_unix`, `clock_offset_unix`, `start_time_iso`, and at stop `t_stop`, `t_stop_unix`, `stop_time_iso`, `duration_s`; **stream flags** `has_wii`, `has_pose`, `has_video`, `camera_names`; `world_frame`, `board_geometry`, `board_pose` (`board_to_world` R/t, `method` pnp/triangulation, `reproj_error_px`, `floor_constrained`, `tilt_deg`, `world_camera` (camera whose frame is the world when no extrinsics were set), `warnings`, `notes`; `null` if not registered), `cameras` (the calibrations used for the recorded cameras), `streams` (name, source, fps, video file), `force_source` (at the end of the recording: type, tare, COP min. load, sensor spacing, board calibration, battery, device path; for auto-connect also the number of connections/disconnects; `null` without a board), `force_source_history` (device and tare in effect from each start/connection, with `t_rel`), `pose_backend` (label of the pose source), `pose_backend_key` (backend key, e.g. `mediapipe`), `keypoint_format` (e.g. `coco17`, `halpe26`, `mediapipe33`) and `pose2sim_model` (the matching Pose2Sim `pose_model`, e.g. `COCO_17`, `HALPE_26`, `BLAZEPOSE`), `pose_info` (backend details, if known), `pose2d` (`csv`: the file name pattern, `null` when **Save 2D keypoints** was off; `cameras` with a `pose2d_<camera>.csv`, `openpose_json`, `json_dir`, `json_files` (name pattern), `json_sets_csv`, `json_cameras` (the cameras with a JSON folder, in Pose2Sim's order), `calib_toml` (`pose2d_json/Calib.toml` or `null`), `calib_toml_cameras`, `calib_toml_note` (cameras left out and why), `json_sets_written`, `json_sets_skipped` (poses without a new video frame of any camera, e.g. from just before the start)), `samples` (counts of `wii`, `pose`, `events` rows). |
 | `wii.csv` | Every Balance Board sample (only if a board or the simulator was connected during the recording). |
 | `camN.mkv` | Video of camera `camN` (MPEG-4 in a Matroska container; plays in VLC, the Windows media apps and OpenCV; if the recording ends abruptly, e.g. a crash or power loss, the file stays readable up to the last few seconds, where an MP4 would be lost completely). Convert to MP4 without re-encoding if needed: `ffmpeg -i cam0.mkv -c copy cam0.mp4`. If the MKV writer is not available, `camN.avi` (MJPG) is written instead (`streams[].video` names the file). The frame rate in the file header is nominal; use the timestamps. |
 | `camN_timestamps.csv` | `frame`, `t`, `t_rel`, `t_unix`: capture time of every stored video frame (one row per frame in the video). |
 | `pose3d.csv` | One row per pose result (only if pose estimation ran during the recording). |
-| `pose2d_<camera>.csv` | The subject's 2D keypoints in every processed frame of that camera (see below). |
-| `pose2d_json/<camera>/` | Optional (recorder option `save_openpose_json`): one OpenPose-format file per processed frame, `<camera>_<frame:012d>_keypoints.json`, for re-triangulating offline with Pose2Sim (see below). |
+| `pose2d_<camera>.csv` | The subject's 2D keypoints in every processed frame of that camera (see below; **Save 2D keypoints**, on by default). |
+| `pose2d_json/` | Optional (**Also save OpenPose JSON (Pose2Sim)**; recorder option `save_openpose_json`), for re-triangulating offline with Pose2Sim (see below): `<camera>/<camera>_<set:06d>_keypoints.json` (one OpenPose-format file per pose and camera), `sets.csv` (set number -> pose time and each camera's video frame) and `Calib.toml` (the recorded cameras with extrinsics). |
 | `events.csv` | Event markers: `t`, `t_rel`, `t_unix`, `label`. Written when the first marker is added: **Mark Event** / F9 in the GUI, a typed label in the Wii-only recorder, and automatic markers: `wii_connected` / `wii_disconnected` when the board link changes, `camera_lost <name>` / `camera_recovered <name>` / `camera_removed <name>`, and `pose_keypoints_changed`. UTF-8 with a byte order mark, so Excel shows non-ASCII labels correctly when the file is double-clicked. |
 | `fused.csv` | Written at stop: Wii data linearly interpolated at the pose timestamps, next to the COM (needs `wii.csv` and `pose3d.csv`). |
 | `summary.json` | Written at stop: sway metrics (see below). |
@@ -589,18 +653,34 @@ no subject was found has empty keypoint values)
 | Column | Meaning |
 |---|---|
 | `t`, `t_rel`, `t_unix` | capture time of that camera frame (as in `camN_timestamps.csv`) |
-| `frame` | the frame number in `camN.mkv` (the `frame` column of `camN_timestamps.csv`); empty if the frame is not in the video (e.g. captured just before the recording started) |
+| `frame` | the frame number in `camN.mkv` (the `frame` column of `camN_timestamps.csv`); empty if the frame is not in the video (e.g. captured just before the recording started). With several cameras a pose waits (at most 0.1 s) for a new frame of every camera, so a frame number rarely appears twice; when it does, the camera had no new frame in time. |
 | `<name>_x`, `<name>_y`, `<name>_score` | pixel coordinates in the original image and confidence (0-1) of every keypoint of the backend's format |
 
-**OpenPose JSON** (`pose2d_json/<camera>/<camera>_<frame:012d>_keypoints.json`, `frame` = video
-frame number): `{"version": 1.3, "people": [{"person_id": [-1], "pose_keypoints_2d": [x1, y1,
-c1, x2, ...], "face_keypoints_2d": [], "hand_left_keypoints_2d": [], "hand_right_keypoints_2d":
-[], "pose_keypoints_3d": [], ...}]}` with all keypoints of the format in `pose_keypoints_2d`
-(missing = `0, 0, 0`), and an empty `people` list when no subject was found. The files of all
-cameras are written together for every processed multi-camera frame set (a set with a frame that
-is not in the videos is skipped in all cameras), so the n-th file of each camera folder belongs
-to the same instant, as Pose2Sim expects. Use the `pose2sim_model` of `session.json` as Pose2Sim's
-`pose_model` and export the calibration with **File -> Export Pose2Sim Calib.toml...**.
+**OpenPose JSON** (`pose2d_json/<camera>/<camera>_<set:06d>_keypoints.json`): `{"version": 1.3,
+"people": [{"person_id": [-1], "pose_keypoints_2d": [x1, y1, c1, x2, ...], "face_keypoints_2d":
+[], "hand_left_keypoints_2d": [], "hand_right_keypoints_2d": [], "pose_keypoints_3d": [],
+...}]}` with all keypoints of the format in `pose_keypoints_2d` (missing = `0, 0, 0`), and an
+empty `people` list when no subject was found. The number is a **set** number, not a video frame
+number: each pose with a new video frame of at least one camera is one set, numbered 0, 1, 2, ...
+without gaps, and **every** recorded camera gets a file with that number (an empty `people`
+list when that camera had no new frame for the pose, was left out as stale, or its frame is not
+in its video, e.g. after the camera was removed and added again). So the files with the same
+number in all camera folders are the same pose, which is how Pose2Sim pairs them (it reads, for
+every frame number f from 0, the file whose number is f in each folder). Poses without a new
+video frame of any camera (e.g. frames captured just before the start) get no set
+(`json_sets_skipped`).
+
+**`pose2d_json/sets.csv`**: `set`, `t`, `t_rel`, `t_unix` (the pose time, as in `pose3d.csv`) and
+for every camera `<camera>_frame` (the frame number in `camN.mkv`) and `<camera>_t` (its capture
+time); both empty when that camera's file of the set has no person. Sets follow the pose rate,
+so they are not evenly spaced in time: use this file to map Pose2Sim's frame numbers back to
+times and video frames.
+
+**`pose2d_json/Calib.toml`**: the calibrations of the recorded cameras that have extrinsics, in
+the order in which Pose2Sim pairs Calib.toml with the `<camera>_json` folders (by the last
+number in the folder name, then alphabetically). Use the `pose2sim_model` of `session.json` as
+Pose2Sim's `pose_model` (see
+[Re-triangulating with Pose2Sim](#re-triangulating-with-pose2sim)).
 
 **`fused.csv` columns**: `t`, `t_rel`, `t_unix`, `TR_kg`, `BR_kg`, `TL_kg`, `BL_kg`, `total_kg`,
 `cop_x_board`, `cop_y_board`, `cop_x_world`, `cop_y_world`, `cop_z_world`, `com_x`, `com_y`,
@@ -770,6 +850,213 @@ applies only if the other app uses WiimoteLib; check its documentation.)
 
 ---
 
+## 2D pose backends
+
+PoseBoard gets 3D keypoints from **2D keypoint detectors** ("backends") run on every camera
+image. MediaPipe is built in; the others are optional Python packages. All backends are listed
+in tab **4 Record**; the ones that cannot be used here are greyed out with the reason and the
+install command. Each backend reports its keypoints in a fixed layout (keypoint format), which
+decides the recorded columns, the drawn skeleton and the Pose2Sim model name.
+
+| Backend (label in the list) | Key | Keypoints | 3D from one camera? | Speed class (CPU) | Install | License |
+|---|---|---|---|---|---|---|
+| MediaPipe Pose Landmarker | `mediapipe` | MediaPipe-33 (feet: heel, toe) | **yes** (metric world landmarks) | fast | built in (models lite / full / heavy) | Apache-2.0 |
+| RTMPose body (COCO-17, rtmlib) | `rtmpose` | COCO-17 (no feet) | no | fast | `pip install rtmlib onnxruntime` | Apache-2.0 |
+| RTMPose body + feet (Halpe-26, rtmlib) | `rtmpose_halpe26` | Halpe-26 (heels, toes: better COM); **recommended** | no | fast | `pip install rtmlib onnxruntime` | Apache-2.0 |
+| RTMW / DWPose whole body (133, rtmlib) | `rtmw_wholebody` | COCO-WholeBody-133 (body, feet, face, hands) | no | medium | `pip install rtmlib onnxruntime` | Apache-2.0 |
+| RTMO one-stage (COCO-17, rtmlib) | `rtmo` | COCO-17 | no | medium | `pip install rtmlib onnxruntime` | Apache-2.0 |
+| ViTPose (COCO-17, rtmlib ONNX) | `vitpose_onnx` | COCO-17 | no | medium | `pip install rtmlib onnxruntime` | Apache-2.0 |
+| RTMPose3D whole body 3D (rtmlib) | `rtmpose3d` | COCO-WholeBody-133 + 3D skeleton | **yes** (depth approximate, scaled to a 1.70 m body) | slow | `pip install rtmlib onnxruntime` | Apache-2.0 |
+| YOLO11 / YOLOv8 / YOLO26 pose (Ultralytics) | `yolo_pose` | COCO-17 | no | fast (n, s) to slow (x) | `pip install ultralytics` | **AGPL-3.0** (strong copyleft, also for network use: check it before using PoseBoard with this backend in a closed-source product or service; Ultralytics also sells enterprise licenses) |
+| Keypoint R-CNN (torchvision) | `keypoint_rcnn` | COCO-17 | no | slow (GPU advised) | `pip install torch torchvision` | BSD-3-Clause |
+| ViTPose (Hugging Face transformers) | `vitpose_hf` | COCO-17 | no | slow (GPU advised) | `pip install transformers torch torchvision` | Apache-2.0 |
+| OpenPose (OpenCV DNN, Caffe model files) | `openpose_dnn` | BODY_25 or COCO-18 | no | slow | included (OpenCV); weights by hand (~105 / 209 MB) | **academic / non-commercial use only** (OpenPose license) |
+| MMPose (MMPoseInferencer, e.g. HRNet) | `mmpose` | depends on the model (COCO-17 by default) | no | medium | `pip install -U openmim && mim install mmengine "mmcv>=2.0.1" mmdet mmpose` | Apache-2.0 |
+| MoveNet single pose (ONNX Runtime) | `movenet` | COCO-17 | no | very fast | `pip install onnxruntime` | Apache-2.0 |
+
+Notes:
+
+* **Speed classes** are rough, for one 720p camera image on a recent 4-core laptop CPU: fast =
+  real time (tens of ms), medium = a few frames per second, slow = about one frame per second or
+  less. The pose rate is per frame set, so it drops with the number of cameras. On an NVIDIA GPU
+  (**Device** `auto` / `cuda`) the ONNX and PyTorch backends are many times faster.
+* **Model files** download on first use: MediaPipe from storage.googleapis.com, rtmlib from
+  download.openmmlab.com / huggingface.co into `~/.cache/rtmlib/hub/checkpoints`
+  (`%TORCH_HOME%\hub\checkpoints` if `TORCH_HOME` is set), YOLO and MoveNet from GitHub into
+  `models/`, Keypoint R-CNN from download.pytorch.org into the PyTorch cache (`~/.cache/torch`),
+  ViTPose from huggingface.co into `~/.cache/huggingface`. Without access, download the file
+  elsewhere: the error message names the URL and where to put it. For rtmlib either select the
+  file as **Pose model file** / **Person detector file**, or copy it unchanged (same file name
+  as in the URL, `.zip` or `.onnx`) into `~/.cache/rtmlib/hub/checkpoints`, where rtmlib finds
+  it without downloading. An 80-class COCO YOLOX (e.g. `yolox_tiny.onnx` from the YOLOX GitHub
+  releases) works as person detector: files without built-in NMS return all classes, and only
+  the persons are kept (detected from the ONNX output shape). For ViTPose (transformers) type a
+  local model folder as **Model**, or set `HF_ENDPOINT` to a Hugging Face mirror.
+* **OpenPose**: the network definition (`pose_deploy.prototxt`) is downloaded from GitHub if
+  left empty, but the weights are not: get `pose_iter_584000.caffemodel` (BODY_25) or
+  `pose_iter_440000.caffemodel` (COCO) with OpenPose's `models/getModels.sh` (or its mirrors)
+  and select it as **Caffe model file**, or put it into `models/openpose/body_25/` /
+  `models/openpose/coco/` and leave the field empty. Single person only (no multi-person
+  grouping).
+* **MMPose** needs mmcv, which often has no prebuilt wheel for a recent Python / PyTorch on
+  Windows; it is meant for users who already have a working MMPose installation.
+* The **Plugin (.py)** entry runs your own estimator (see
+  [Integrating PoseAssess](#integrating-poseassess-or-any-other-3d-pose-tool)).
+* From Python: `create_detector("rtmpose_halpe26", mode="balanced", device="cpu")` and
+  `MultiViewEstimator(detector)` (`poseboard.pose.detectors`, `poseboard.pose.multiview`).
+
+### How 3D is obtained
+
+The world frame is the floor checkerboard; camera frames are never mixed.
+
+* **Two or more cameras with extrinsics** see the subject: the 2D keypoints are triangulated
+  (weighted DLT, weights = confidences, keypoints below **Min keypoint confidence** left out).
+  **Outlier rejection** per keypoint: while its reprojection error in some camera exceeds the
+  **Reprojection outlier threshold** and at least two cameras remain, the camera whose removal
+  fits the others best is dropped (e.g. a left/right swap or another person in one view).
+  Mode `triangulated`; the status line and `pose3d.csv` give the mean reprojection error. When
+  fewer than 6 keypoints are seen confidently by two cameras (e.g. a weak or back-facing
+  detection in the second camera) and the backend gives a 3D skeleton, the single-view lift of
+  the camera with the most confident keypoints is used instead (a note says so); without a 3D
+  skeleton and with no keypoint triangulated, the pose is `2d_only`.
+* **One usable camera** and a backend with a 3D skeleton (**MediaPipe**, **RTMPose3D**): that
+  metric, body-centred skeleton is placed in the world with PnP against the 2D keypoints.
+  Mode `single_view_3d`; depth along the viewing direction is approximate.
+* Otherwise (**one camera and a 2D-only backend**, or no camera with extrinsics sees the
+  subject): mode `2d_only`. The 2D skeleton is still drawn and recorded
+  (`pose2d_<camera>.csv`, OpenPose JSON), but there are no 3D keypoints and no COM; the
+  notes say why (e.g. `cam1 not used for 3D: no extrinsics`). Add a second calibrated camera,
+  or choose MediaPipe / RTMPose3D, for 3D.
+* Cameras without extrinsics are not used for 3D when others have them (the notes say so).
+  Without any extrinsics the world frame is the camera the board was registered with, and
+  only that camera is used; while that camera is not running (removed, or not added after
+  loading a project) the pose is `2d_only` and a red warning says so, since a pose from
+  another camera would be in another frame than the board and the COP.
+* **Temporal smoothing (One-Euro)** filters each 3D coordinate over time: a 2 Hz low-pass at
+  rest whose cutoff rises with the speed (4 Hz more per m/s). A movement of about 1.5 m/s lags
+  by about one frame; a 2 cm sway keeps about 97 % of its amplitude at 0.5 Hz and about 90 % at
+  1 Hz; the jitter of a still keypoint is roughly halved. It restarts when a keypoint
+  disappears or the mode changes. It is off by default; leave it off when the sway amplitude
+  above 1 Hz matters.
+
+### Which person is the subject
+
+Every backend returns all persons it finds; in each camera PoseBoard picks one:
+
+1. with **Pick the person standing on the board** (default) and a registered board: the person
+   whose feet (ankles / heels) are on the board as seen by that camera; else the subject of the
+   previous frame (tracked by its box), unless its feet are seen far from the board, so a
+   spotter next to the board never replaces a subject whose feet are hidden or unsure in one
+   camera; else the person whose feet are nearest to the board (within about one board
+   diagonal). A person detected **alone** is used only when the feet are on the board, when
+   it is the tracked subject, or when the feet are not visible and nobody was tracked:
+   otherwise the camera is not used for that frame (note "nobody detected on the board"), so a
+   bystander is never triangulated with the subject seen by the other cameras;
+2. otherwise the person that best overlaps the subject's box in the previous frame (tracking);
+3. otherwise the largest person (box area x confidence).
+
+MediaPipe finds one person unless **Max. persons** is set higher; set it to 2-4 when other people
+can be in view.
+
+### 2D keypoints and Pose2Sim
+
+With **Save 2D keypoints** every processed frame of every camera gives a row in
+`pose2d_<camera>.csv` (pixels of the original image, confidence, and the frame number of
+`camN.mkv`); with **Also save OpenPose JSON (Pose2Sim)** also one OpenPose-format JSON file per
+pose in `pose2d_json/<camera>/`, with `sets.csv` and `Calib.toml`. `session.json` names the
+backend (`pose_backend_key`), the
+keypoint format (`keypoint_format`) and the matching Pose2Sim model (`pose2sim_model`); see
+[Output files](#output-files).
+
+#### Re-triangulating with Pose2Sim
+
+Pose2Sim can triangulate (and filter, and fit an OpenSim model to) the recorded 2D keypoints
+offline:
+
+1. The recording's `pose2d_json/Calib.toml` holds the recorded cameras with extrinsics, already
+   in Pose2Sim's order (**File -> Export Pose2Sim Calib.toml...** writes all calibrated cameras
+   in the same order, but may include cameras that were not recorded).
+2. In a Pose2Sim trial folder, put `Calib.toml` into `calibration/` and copy each
+   `pose2d_json/<camera>` folder to `pose/<camera>_json` (Pose2Sim looks for folders whose names
+   contain `json`). Copy only the cameras listed in `Calib.toml` (`calib_toml_cameras` in
+   `session.json`): Pose2Sim pairs folders and calibrations by order, not by name, and stops
+   when their numbers differ. Keep the folder names `<camera>_json`, so they sort like
+   `Calib.toml`.
+3. In Pose2Sim's `Config.toml` set `pose_model` from this table (also stored as
+   `pose2sim_model` in `session.json`), and skip Pose2Sim's own pose estimation step. There is
+   no video to read the frame rate from: set `frame_rate` to the pose rate (`pose_rate_hz` in
+   `summary.json`). The sets follow the pose rate and are not evenly spaced, so Pose2Sim's
+   time-based filtering is approximate; map its frame numbers back to times and video frames
+   with `pose2d_json/sets.csv`.
+
+| PoseBoard format (`keypoint_format`) | Backends | Pose2Sim `pose_model` |
+|---|---|---|
+| `coco17` | RTMPose, RTMO, ViTPose, YOLO pose, Keypoint R-CNN, MoveNet, MMPose (COCO models) | `COCO_17` (newer Pose2Sim: `Body`) |
+| `halpe26` | RTMPose body + feet | `HALPE_26` (newer Pose2Sim: `Body_with_feet`) |
+| `wholebody133` | RTMW / DWPose, RTMPose3D | `COCO_133` (newer Pose2Sim: `Whole_body`) |
+| `body25` | OpenPose BODY_25 | `BODY_25` |
+| `coco18` | OpenPose COCO | `COCO` |
+| `mediapipe33` | MediaPipe | `BLAZEPOSE` |
+
+The JSON files hold only the subject (the person picked in each camera), so Pose2Sim's person
+association has a single candidate. Every camera folder has one file per set, numbered 0, 1,
+2, ... without gaps, and the same number is the same pose in all folders (empty when a camera
+had no new frame for it).
+
+### Installing the extra backends on Windows
+
+From the PoseBoard folder (with the virtual environment of [Installation](#installation-windows)):
+
+```bat
+REM everything (rtmlib + ONNX Runtime, Ultralytics, PyTorch CPU, torchvision, transformers)
+.venv\Scripts\python -m pip install -r requirements-extras.txt
+
+REM ... or only what you need
+.venv\Scripts\python -m pip install rtmlib onnxruntime
+.venv\Scripts\python -m pip install ultralytics
+.venv\Scripts\python -m pip install torch torchvision
+.venv\Scripts\python -m pip install transformers torch torchvision
+```
+
+(or `.venv\Scripts\python -m pip install -e ".[rtmlib]"`, `".[yolo]"`, `".[torchvision]"`,
+`".[vitpose]"`, `".[all]"`).
+
+**Then restore a single OpenCV build.** rtmlib and Ultralytics depend on `opencv-python`,
+which installs a second copy of the `cv2` module over PoseBoard's `opencv-contrib-python` (needed
+by MediaPipe); the result can fail to import or miss functions. After installing them run:
+
+```bat
+.venv\Scripts\python -m pip uninstall -y opencv-python opencv-python-headless
+.venv\Scripts\python -m pip install --force-reinstall --no-deps opencv-contrib-python
+```
+
+(`--no-deps` keeps pip from replacing NumPy.) Repeat this after every upgrade of rtmlib or
+Ultralytics. Restart PoseBoard afterwards: the backend list is built at start. YOLO26 needs
+Ultralytics 8.4 or newer (`pip install -U ultralytics`); older versions give a message saying
+so.
+
+**NVIDIA GPU (CUDA).**
+
+* rtmlib and MoveNet use ONNX Runtime: replace the CPU package with the GPU one,
+  `pip uninstall -y onnxruntime` then `pip install onnxruntime-gpu` (it needs the CUDA and cuDNN
+  versions listed for that ONNX Runtime release; see onnxruntime.ai). **Device** `auto` then
+  uses the GPU. rtmlib (and `requirements-extras.txt`, `.[rtmlib]`) require the CPU package
+  `onnxruntime`, so installing or upgrading them installs it again over the GPU files, and
+  **Device** `auto` silently falls back to the CPU (only the log says so). Like the OpenCV
+  step above, repeat after every such install or upgrade:
+
+  ```bat
+  .venv\Scripts\python -m pip uninstall -y onnxruntime onnxruntime-gpu
+  .venv\Scripts\python -m pip install --force-reinstall --no-deps onnxruntime-gpu
+  ```
+* PyTorch (YOLO pose, Keypoint R-CNN, ViTPose transformers): the PyPI wheels of `torch` for
+  Windows are CPU-only. Install a CUDA build from the command given on pytorch.org, e.g.
+  `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124` (pick the
+  CUDA version of your driver), before or after the other packages.
+* OpenPose (OpenCV DNN) runs on the CPU with the pip OpenCV packages (they have no CUDA).
+
+---
+
 ## Integrating PoseAssess (or any other 3D pose tool)
 
 There are two ways to combine an existing 3D pose application with PoseBoard's Wii data. In
@@ -859,7 +1146,7 @@ too few keypoints get empty COM columns; the log says once which segments were m
 | | One camera | Two or more calibrated cameras |
 |---|---|---|
 | Board registration | Clicks intersected with the floor plane (board height above the checkerboard), then position and heading fitted; a few mm with careful clicks. Good if intrinsics are calibrated and the board is seen at an oblique angle (not edge-on). | 5 points triangulated, position and heading fitted flat on the floor. More robust to click errors. |
-| Pose | MediaPipe's metric skeleton placed with PnP. Positions **across** the image are good; **depth along the camera's line of sight is approximate** (errors of several cm are possible), and body proportions come from the model. | Weighted triangulation of 2D keypoints (confidence >= 0.5). Metric and consistent in all directions. |
+| Pose | MediaPipe's (or RTMPose3D's) metric skeleton placed with PnP; other backends give 2D only. Positions **across** the image are good; **depth along the camera's line of sight is approximate** (errors of several cm are possible), and body proportions come from the model. | Weighted triangulation of the 2D keypoints of any backend (confidence >= **Min keypoint confidence**), with per-keypoint outlier rejection. Metric and consistent in all directions. |
 | Recommendation | Put the camera so that the sway direction you care about moves across the image (e.g. a side view for antero-posterior sway), 2-3 m away, whole body and board visible. | Place cameras 60-120° apart around the subject, all seeing the board and the floor checkerboard. |
 
 General tips: calibrate the intrinsics of each camera, keep the resolution fixed, click the
@@ -887,10 +1174,11 @@ test described in [Tab 3](#tab-3---board-setup).
 * **Bluetooth drops leave gaps.** Auto-connect reconnects, but `wii.csv` has no samples while
   the board was disconnected (a drop is detected after up to 5 s without data); the gap is
   marked with `wii_disconnected` / `wii_connected` in `events.csv`.
-* **Multiple cameras are not hardware-synchronized.** The pose uses the newest frame of each
-  camera (and their mean time); a camera whose newest frame is more than about 0.25 s older
-  than the others' is left out. This is fine for standing balance; for fast movements expect
-  some triangulation error.
+* **Multiple cameras are not hardware-synchronized.** A pose is computed once every camera has
+  delivered a new frame (waiting at most 0.1 s) from the newest frame of each camera (and their
+  mean time); a camera whose newest frame is more than about 0.25 s older than the others' is
+  left out. This is fine for standing balance; for fast movements expect some triangulation
+  error (the outlier rejection removes the worst of it).
 * **Pose rate = inference rate.** Live pose runs as fast as the model allows and skips frames;
   the videos contain every frame, so you can re-process them offline (Option B).
 * **The board and the cameras must not move** after board registration and extrinsic
@@ -927,7 +1215,11 @@ test described in [Tab 3](#tab-3---board-setup).
 | **"The click order is mirrored"** | Left/right (or front/back) were swapped while clicking: redo the clicks as described. |
 | **Large board reprojection error / large tilt of the unconstrained fit** | Click more carefully, calibrate intrinsics, check the board dimensions and height, make sure the checkerboard lay on the same floor as the board, use a second camera. |
 | **MediaPipe model download fails** | Download the `.task` file on any computer (URLs in [Installation](#installation-windows)) into the `models` folder named in the error message. |
-| **"(no person detected)"** | The whole body should be visible; improve lighting; try "MediaPipe (heavy)". |
+| **"no person detected"** | The whole body should be visible; improve lighting; try the MediaPipe *heavy* model or another backend (e.g. RTMPose Halpe-26). |
+| **A backend is greyed out ("not installed")** | Its packages are missing: the tooltip names the `pip install` command (see [2D pose backends](#2d-pose-backends)). In the packaged exe, the PyTorch-based backends are never available: use the source install. |
+| **"Cannot start pose estimation ... cannot download"** | The backend's model host is blocked or offline. The message names the URL and the folder or field for a file downloaded elsewhere (rtmlib: **Pose model file** / **Person detector file**, or copy the file into `~/.cache/rtmlib/hub/checkpoints`; Keypoint R-CNN: models folder or **Weights file**; MoveNet: **Model file**; ViTPose (transformers): type a local model folder as **Model**, or set `HF_ENDPOINT`; MMPose: type a model name). |
+| **`import cv2` fails or OpenCV functions are missing after installing extras** | Two OpenCV packages were installed: `pip uninstall -y opencv-python opencv-python-headless`, then `pip install --force-reinstall --no-deps opencv-contrib-python`. |
+| **"2D only" with two cameras** | Both cameras need extrinsics (tab 2, **Set All Camera Extrinsics from Checkerboard**); the notes in the status line name the camera that is not used and why. |
 
 ---
 
@@ -941,6 +1233,17 @@ python -m pytest -q
 The tests need no hardware: they use synthetic camera scenes, the board simulator and an
 offscreen Qt window. On a headless Linux machine set `QT_QPA_PLATFORM=offscreen`
 (`QT_QPA_PLATFORM=offscreen python -m pytest -q tests`).
+
+Tests of optional backends skip (with the reason) when their packages are missing. With the
+extras installed (`requirements-extras.txt`) and internet access, the real-model tests
+download the models and run them on a photo (downloaded once into `~/.cache/poseboard-tests`,
+or `POSEBOARD_TEST_CACHE`); `tests/test_backends_consistency.py` checks every available
+backend against MediaPipe on that photo (joints within 8 % of the image diagonal, left/right
+correct). A backend whose model host is unreachable is skipped with the reason, never passed.
+`POSEBOARD_CONSISTENCY_BACKENDS=rtmpose,yolo_pose` limits the backends,
+`POSEBOARD_TEST_SKIP_LARGE_DOWNLOADS=1` skips the OpenPose weights (~200 MB each). The Windows
+CI build runs the tests twice: in the environment the exe is built from (base + rtmlib / ONNX
+Runtime, no PyTorch), and after installing all extras.
 
 ---
 
@@ -965,7 +1268,9 @@ PoseBoard/
 │   │   ├── base.py            Pose2D / Pose3D / PoseEstimator interface
 │   │   ├── com.py             center of mass (Winter segment table)
 │   │   ├── formats.py         keypoint formats (COCO-17, Halpe-26, BODY_25, COCO-18, WholeBody-133, MediaPipe-33)
-│   │   ├── detectors/         2D pose backends: registry (__init__.py), Detector2D/Person2D (base.py), MediaPipe
+│   │   ├── detectors/         2D pose backends: registry (__init__.py), Detector2D/Person2D (base.py),
+│   │   │                      mediapipe_det, rtmlib_det, ultralytics_det, torchvision_det,
+│   │   │                      vitpose_hf_det, openpose_dnn_det, mmpose_det, movenet_det
 │   │   ├── multiview.py       any 2D backend -> 3D: triangulation with outlier rejection, single-view lifting
 │   │   ├── subject.py         picks the person standing on the board in each camera
 │   │   ├── filters.py         One-Euro keypoint smoothing
@@ -978,9 +1283,11 @@ PoseBoard/
 ├── plugins/
 │   └── poseassess_plugin_template.py   template for your own pose estimator
 ├── tests/                     pytest suite (no hardware needed)
-├── models/                    MediaPipe model files (downloaded on first use)
+├── installer/                 PyInstaller spec and entry points of PoseBoard.exe / PoseBoard-Wii.exe (--selftest)
+├── .github/workflows/         Windows CI: tests, exe build, self-tests, zip
+├── models/                    model files (MediaPipe, YOLO, MoveNet, OpenPose, ...; downloaded on first use)
 ├── recordings/                default output folder (created on first recording)
-├── requirements.txt / requirements-dev.txt / pyproject.toml
+├── requirements.txt / requirements-dev.txt / requirements-extras.txt / pyproject.toml
 └── run_poseboard.bat          Windows launcher
 ```
 

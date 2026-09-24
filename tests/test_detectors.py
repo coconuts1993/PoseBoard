@@ -122,6 +122,29 @@ def test_detectors_package_exports():
         assert hasattr(detectors, name)
 
 
+def test_readme_backend_table_matches_registry():
+    """README's table in "2D pose backends": one row per backend, in registry order, with the
+    exact label shown in the Record tab, the key, the keypoint format, 3D from one camera, the
+    pip command and the license."""
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    section = text.split("\n## 2D pose backends", 1)[1].split("\n### ", 1)[0]
+    rows = [[c.strip() for c in ln.strip().strip("|").split("|")]
+            for ln in section.splitlines() if ln.startswith("| ") and "`" in ln]
+    assert [r[1].strip("`") for r in rows] == list(BACKENDS)
+    fmt_text = {"coco17": "COCO-17", "halpe26": "Halpe-26", "wholebody133": "COCO-WholeBody-133",
+                "body25": "BODY_25", "mediapipe33": "MediaPipe-33"}
+    for label, key, kps, one_cam_3d, _speed, install, lic in rows:
+        spec = BACKENDS[key.strip("`")]
+        assert label == spec.label, (key, label, spec.label)
+        assert fmt_text[spec.keypoint_format] in kps, (key, kps)
+        assert one_cam_3d.startswith("**yes**" if spec.provides_3d else "no"), (key, one_cam_3d)
+        if spec.key == "mediapipe":
+            assert install.startswith("built in"), install  # in requirements.txt
+        elif spec.install.startswith("pip install"):
+            assert f"`{spec.install.split('  (')[0].strip()}`" == install, (key, install)
+        assert spec.license.lower() in lic.replace("**", "").lower(), (key, lic, spec.license)
+
+
 # ------------------------------------------------------------------ MediaPipe, real model
 @pytest.fixture(scope="module")
 def mediapipe_model():

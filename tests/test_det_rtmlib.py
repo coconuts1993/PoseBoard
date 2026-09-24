@@ -453,6 +453,66 @@ def test_factory_options_and_errors(fake_rtmlib, monkeypatch, tmp_path):
     assert d3.body_height == 1.8 and d3.options["body_height"] == 1.8
 
 
+def _with_output_dim(cls, dims):
+    """``cls`` (a fake rtmlib tool) with an ONNX Runtime-like session whose first output has
+    the last dimension ``dims[file name]`` (the file name is the end of the model path)."""
+    class Tool(cls):
+        det_mode = "human"
+
+        def __init__(self, onnx_model, *a, **kw):
+            super().__init__(onnx_model, *a, **kw)
+            self.det_mode = kw.get("det_mode", "human")
+            n = next(v for k, v in dims.items() if onnx_model.endswith(k))
+            out = SimpleNamespace(shape=[1, 3549, n])
+            self.session = SimpleNamespace(get_outputs=lambda: [out],
+                                           get_inputs=lambda: [SimpleNamespace(
+                                               shape=[1, 3, 416, 416])])
+    return Tool
+
+
+def test_yolox_without_nms_keeps_only_persons(fake_rtmlib, monkeypatch, tmp_path):
+    """An 80-class YOLOX without built-in NMS (output (1, N, 85), e.g. the GitHub releases)
+    returns boxes of every class in rtmlib's default det_mode="human": it is switched to
+    "multiclass", so only persons are kept. Files with NMS (last dimension 5) are left alone
+    (rtmlib's multiclass mode fails on them)."""
+    for name in ("yolox_tiny.onnx", "yolox_nms.onnx", "yolox_dyn.onnx"):
+        (tmp_path / name).write_bytes(b"onnx")
+    monkeypatch.setattr(fake_rtmlib, "YOLOX", _with_output_dim(
+        fake_rtmlib.YOLOX, {"yolox_tiny.onnx": 85, "yolox_nms.onnx": 5, "yolox_dyn.onnx": "N",
+                            "det.onnx": 5}))
+    d = rd.create_rtmpose(det_model=str(tmp_path / "yolox_tiny.onnx"))
+    assert d.det_model.det_mode == "multiclass" and "det_mode" not in d.options
+    assert d.det_model.model_input_size == (416, 416)
+    for name in ("yolox_nms.onnx", "yolox_dyn.onnx"):  # NMS included / shape unknown
+        assert rd.create_rtmpose(det_model=str(tmp_path / name)).det_model.det_mode == "human"
+    assert rd.create_rtmpose().det_model.det_mode == "human"  # rtmlib's default files: NMS
+    # "" (an empty GUI file field) = the default model of the mode
+    d = create_detector("rtmpose", det_model="", pose_model=" ")
+    assert d.det_model.onnx_model.endswith("body-balanced-det.onnx")
+    assert "det_model" not in d.options and "pose_model" not in d.options
+    # with class ids, only persons are passed on (a bus is not a person)
+    det = rd.RTMLibDetector("rtmpose", StubPose(lambda b: (_grid_keypoints(b, 17), np.ones(17))),
+                            StubDet((np.array([[10, 10, 90, 200], [100, 20, 300, 220.0]]),
+                                     np.array([0, 5]))))
+    assert len(det.detect(np.zeros((240, 320, 3), np.uint8), 0.0, "c")) == 1
+
+
+def test_model_download_error_names_the_gui_fields_and_the_cache(fake_rtmlib):
+    with pytest.raises(rd.ModelUnavailable) as e:
+        rd.create_rtmpose(det_model="https://h/fail-det.zip")
+    msg = str(e.value)
+    assert "'Person detector file'" in msg and "det_model=" in msg
+    assert os.path.join("hub", "checkpoints") in msg
+
+
+def test_rtmlib_backends_offer_model_file_options():
+    for key in RTMLIB_KEYS:
+        spec = BACKENDS[key]
+        files = ("pose_model",) if key == "rtmo" else ("pose_model", "det_model")
+        assert spec.needs_files == files and all(spec.defaults[f] == "" for f in files)
+        assert all(spec.options[f] == () for f in files)
+
+
 def test_factory_without_rtmlib(monkeypatch):
     monkeypatch.setitem(sys.modules, "rtmlib", None)  # import fails
     with pytest.raises(RuntimeError, match="pip install rtmlib"):
@@ -548,6 +608,36 @@ def test_rtmlib_rtmpose_crops_map_back_to_image_pixels():
         assert err.max() < 1.5, err
         assert np.isnan(p.keypoints[4]).all() and p.scores[4] == 0
         assert np.allclose(p.scores[ok], np.clip(raw[ok], 0, 1), atol=1e-6)
+
+
+@needs_rtmlib
+def test_exe_selftest_runs_rtmlibs_rtmpose(monkeypatch):
+    """The pose-model check of ``PoseBoard.exe --selftest`` (installer/entry_gui.py) with
+    rtmlib's own RTMPose class (fake ONNX session): the model is called directly and through
+    the detector on a forced whole-image box, even though YOLOX finds nobody."""
+    import importlib
+    from pathlib import Path
+
+    import rtmlib
+
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "installer"))
+    entry = importlib.import_module("entry_gui")
+    K = 17
+
+    def fn(x):
+        sx, sy = np.zeros((1, K, 384), np.float32), np.zeros((1, K, 512), np.float32)
+        sx[0, np.arange(K), 100 + 10 * np.arange(K)] = 0.9
+        sy[0, :, 250] = 0.9
+        return [sx, sy]
+
+    sess = FakeSession(fn, (1, 3, 256, 192), [(1, K, 384), (1, K, 512)])
+    pose = _tool(rtmlib.RTMPose, sess, model_input_size=(192, 256),
+                 mean=(123.675, 116.28, 103.53), std=(58.395, 57.12, 57.375))
+    det = rd.RTMLibDetector("rtmpose", pose, StubDet(np.zeros((0, 4))))
+    line = entry._selftest_real_rtmpose(det, np.zeros((240, 320, 3), np.uint8))
+    assert "OK (1 person with 17 keypoints" in line, line
+    assert len(sess.inputs) == 2  # direct call + the detector pipeline
+    assert det.det_model.out.shape == (0, 4)  # the real detector is put back
 
 
 @needs_rtmlib
@@ -649,6 +739,32 @@ def test_real_yolox_person_detector_on_the_photo(person_image):
     assert x1 < 300 and x2 > 700 and y1 < 280 and y2 > 620
     assert pose.calls[0][0][0, 0].tolist() == person_image[0, 0, ::-1].tolist()  # RGB
     assert d.detect(np.zeros_like(person_image), 0.0, "cam0") == []
+
+
+BUS_URL = "https://github.com/ultralytics/assets/releases/download/v0.0.0/bus.jpg"
+
+
+@needs_rtmlib
+def test_real_yolox_without_nms_returns_only_persons():
+    """The real 80-class YOLOX-tiny (GitHub release, no built-in NMS) on a street photo with a
+    bus: built like the factories build it (rtmlib's default det_mode), only persons remain."""
+    import rtmlib
+
+    path = download_cached(YOLOX_TINY_URL, "yolox_tiny.onnx", timeout=120)
+    img = cv2.imread(str(download_cached(BUS_URL, "bus.jpg", timeout=60)))
+    assert img is not None
+    det = rtmlib.YOLOX(str(path), model_input_size=(416, 416), backend="onnxruntime",
+                       device="cpu")
+    boxes_all = np.asarray(det(img), float).reshape(-1, 4)
+    wide = boxes_all[:, 2] - boxes_all[:, 0] > 0.6 * img.shape[1]
+    assert wide.any()  # rtmlib's "human" mode: the bus comes back as a box
+    assert rd.keep_persons_only(det) == "multiclass"
+    pose = StubPose(lambda b: (_grid_keypoints(b, 17), np.ones(17)))
+    people = rd.RTMLibDetector("rtmpose", pose, det).detect(img, 0.0, "cam0")
+    assert 2 <= len(people) < len(boxes_all)
+    for p in people:
+        x1, y1, x2, y2 = p.bbox
+        assert x2 - x1 < 0.6 * img.shape[1] and y2 - y1 > 1.5 * (x2 - x1)  # standing persons
 
 
 # ------------------------------------------------------------------ real models (smoke)

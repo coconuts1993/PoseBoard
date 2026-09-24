@@ -28,6 +28,15 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4"]
+# Optional 2D pose backends (README, "2D pose backends"). After installing rtmlib or yolo,
+# restore a single OpenCV build: pip uninstall -y opencv-python opencv-python-headless, then
+# pip install --force-reinstall --no-deps opencv-contrib-python
+rtmlib = ["rtmlib>=0.0.16", "onnxruntime>=1.16"]
+yolo = ["ultralytics>=8.4"]  # 8.4: first release with YOLO26
+torchvision = ["torch>=2.1", "torchvision>=0.16"]
+vitpose = ["transformers>=4.48", "torch>=2.1", "torchvision>=0.16"]
+all = ["rtmlib>=0.0.16", "onnxruntime>=1.16", "ultralytics>=8.4", "torch>=2.1",
+       "torchvision>=0.16", "transformers>=4.48"]
 
 [project.scripts]
 poseboard = "poseboard.gui.app:main"

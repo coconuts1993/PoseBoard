@@ -99,9 +99,10 @@ def _model_name(model) -> str:
 
 # ------------------------------------------------------------------ model file
 def models_dir() -> Path:
-    from poseboard.pose import mediapipe_backend as mpb  # MODEL_DIR is patched in the frozen app
+    # imported here: MODEL_DIR is patched in the frozen app
+    from poseboard.pose import mediapipe_backend
 
-    return Path(mpb.MODEL_DIR)
+    return Path(mediapipe_backend.MODEL_DIR)
 
 
 def _sha256(path: Path) -> str:
@@ -123,7 +124,7 @@ def _download(url: str, target: Path, sha256: str, timeout: float = 30.0) -> Pat
         if digest != sha256:
             raise RuntimeError(f"SHA-256 mismatch ({digest})")
         tmp.replace(target)
-    except Exception as e:  # noqa: BLE001  (offline, proxy, disk, checksum)
+    except Exception as e:
         try:
             tmp.unlink()
         except OSError:
@@ -203,7 +204,7 @@ def next_region(kp: np.ndarray, scores: np.ndarray, h: int,
     half = min(half, max(cx, w - cx, cy, h - cy))
     if half > max(w, h) / 2.0 or not half > 0:
         return init_region(h, w)
-    return cx - half, cy - half, 2.0 * half, 2.0 * half
+    return float(cx - half), float(cy - half), float(2.0 * half), float(2.0 * half)
 
 
 def crop_and_resize(image: np.ndarray, region: tuple[float, float, float, float],
@@ -217,7 +218,7 @@ def crop_and_resize(image: np.ndarray, region: tuple[float, float, float, float]
     fx = fy = 1.0
     k = min(out_w / rw, out_h / rh)
     if k < 0.9:  # anti-aliasing: shrink the whole image with area averaging first
-        nw, nh = max(1, int(round(w * k))), max(1, int(round(h * k)))
+        nw, nh = max(1, round(w * k)), max(1, round(h * k))
         image = cv2.resize(image, (nw, nh), interpolation=cv2.INTER_AREA)
         fx, fy = nw / w, nh / h
     kx, ky = out_w / (rw * fx), out_h / (rh * fy)

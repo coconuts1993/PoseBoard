@@ -112,6 +112,20 @@ def fake_ul(monkeypatch, tmp_path):
     return state
 
 
+def test_yolo26_needs_ultralytics_8_4(fake_ul, monkeypatch):
+    """YOLO26 weights cannot be loaded by ultralytics < 8.4 (no Pose26 head): a clear message,
+    before anything is downloaded; other families and unknown version strings are fine."""
+    monkeypatch.setattr(sys.modules["ultralytics"], "__version__", "8.3.253")
+    with pytest.raises(RuntimeError, match=r"YOLO26 needs ultralytics>=8\.4"):
+        ud.create(model="n", version="26", device="cpu")
+    assert fake_ul.downloads == []
+    assert ud.create(model="n", version="11", device="cpu").weights_path.name == "yolo11n-pose.pt"
+    monkeypatch.setattr(sys.modules["ultralytics"], "__version__", "8.4.0")
+    assert ud.create(model="s", version="26", device="cpu").weights_path.name == "yolo26s-pose.pt"
+    ud.check_ultralytics_version("yolo26n-pose.pt", "0-fake")  # not a version: not checked
+    ud.check_ultralytics_version(None, "8.0.0")
+
+
 def _raw_person(k=17, x0=100.0, y0=50.0):
     """Distinct coordinates per keypoint index."""
     j = np.arange(k, dtype=np.float64)

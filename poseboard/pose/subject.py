@@ -4,10 +4,19 @@ camera image.
 Priority:
 
 1. the person whose feet (midpoint of the confident ankle/heel keypoints) lie inside the
-   board's projected outline, or nearest to it (within about one board diagonal);
-2. otherwise the person whose box overlaps most with the subject's box in the previous frame
-   of this camera (tracking continuity);
-3. otherwise the person with the largest box area x detection score.
+   board's projected outline;
+2. the person tracked from the previous frame of this camera (box overlap IoU >=
+   ``TRACK_MIN_IOU``), unless their feet are seen far from the board: a person whose feet are
+   hidden (cut off by the image border, covered by the board edge, low ankle scores) is not
+   replaced by somebody standing next to the board, e.g. a spotter;
+3. the person whose feet are nearest to the board (within about one board diagonal);
+4. otherwise the person whose box overlaps most with the previous box (IoU >= ``MIN_IOU``);
+5. otherwise the person with the largest box area x detection score.
+
+With the board outline, a person detected alone is accepted only when their feet are on the
+board (``SINGLE_MARGIN_DIAGONALS``), or when they are tracked from the previous frame (feet
+hidden or near the board), or when their feet are hidden and nobody was tracked; otherwise
+nobody is returned, so a bystander is never used in place of a subject hidden in this camera.
 """
 
 from __future__ import annotations
@@ -25,6 +34,9 @@ FOOT_MIN_SCORE = 0.3
 # A person "near" the board: feet at most this many board diagonals (in pixels) outside it
 NEAR_BOARD_DIAGONALS = 1.0
 MIN_IOU = 0.1  # below this the previous box does not identify anybody
+TRACK_MIN_IOU = 0.3  # at least this overlap with the previous box: the same person
+# A person detected alone: feet at most this many board diagonals outside the board outline
+SINGLE_MARGIN_DIAGONALS = 0.2
 
 
 def board_polygon_px(board: BoardPose | None, cam: CameraCalibration,
@@ -98,29 +110,41 @@ def _size_score(p: Person2D) -> float:
 def select_subject(people: list[Person2D], *, board_polygon_px: np.ndarray | None = None,
                    previous_bbox: np.ndarray | None = None,
                    fmt: KeypointFormat) -> Person2D | None:
-    """The subject among ``people`` (see the module docstring); None if the list is empty."""
+    """The subject among ``people`` (see the module docstring); None if the list is empty, or
+    if the only person detected is not on the board (see the module docstring)."""
     people = [p for p in people if p is not None]
     if not people:
         return None
-    if len(people) == 1:
-        return people[0]
     prev = None if previous_bbox is None else np.asarray(previous_bbox, np.float64).reshape(4)
+    has_board = board_polygon_px is not None and len(board_polygon_px) >= 3
+    if len(people) == 1 and not has_board:
+        return people[0]
 
-    if board_polygon_px is not None and len(board_polygon_px) >= 3:
+    if has_board:
         poly = np.asarray(board_polygon_px, np.float32).reshape(-1, 1, 2)
         diag = float(np.linalg.norm(np.ptp(poly.reshape(-1, 2), axis=0)))
-        cands = []
+        dist = []  # signed distance of the feet to the outline (> 0 inside), None: feet hidden
         for p in people:
             f = foot_point(p, fmt)
-            if f is None:
-                continue
-            d = cv2.pointPolygonTest(poly, (float(f[0]), float(f[1])), True)  # > 0 inside
-            cands.append((p, d))
-        inside = [p for p, d in cands if d >= 0]
+            dist.append(None if f is None else
+                        cv2.pointPolygonTest(poly, (float(f[0]), float(f[1])), True))
+        inside = [p for p, d in zip(people, dist) if d is not None and d >= 0]
         if inside:
             # several feet on the board (overlapping persons in the image): tracking, then size
             return max(inside, key=lambda p: (iou(p.box(), prev) >= MIN_IOU, _size_score(p)))
-        near = [(p, d) for p, d in cands if -d <= NEAR_BOARD_DIAGONALS * diag]
+        # the tracked person keeps priority unless their feet are seen far from the board
+        overlaps = [iou(p.box(), prev) for p in people]
+        k = int(np.argmax(overlaps))
+        if overlaps[k] >= TRACK_MIN_IOU and (dist[k] is None
+                                             or -dist[k] <= NEAR_BOARD_DIAGONALS * diag):
+            return people[k]
+        if len(people) == 1:  # alone and not tracked: only with the feet on the board
+            d = dist[0]
+            if d is None:
+                return people[0] if prev is None else None
+            return people[0] if -d <= SINGLE_MARGIN_DIAGONALS * diag else None
+        near = [(p, d) for p, d in zip(people, dist)
+                if d is not None and -d <= NEAR_BOARD_DIAGONALS * diag]
         if near:
             return max(near, key=lambda pd: pd[1])[0]
 

@@ -1,10 +1,17 @@
 """Temporal smoothing of keypoint trajectories.
 
 ``OneEuroFilter`` (Casiez, Roussel and Vogel, CHI 2012): a low-pass filter whose cutoff
-frequency rises with the speed of the signal, so slow sway is smoothed strongly (little jitter)
+frequency rises with the speed of the signal, so a still keypoint is smoothed (less jitter)
 while fast movements are followed with little lag. It works element-wise on arrays, e.g. the
 (K, 3) keypoints of a pose; an element that becomes NaN (a keypoint that disappeared) is reset
 and starts afresh when it comes back.
+
+The defaults are chosen for keypoint coordinates in meters at 15-30 poses per second:
+``min_cutoff = 2 Hz`` keeps about 90 % of the amplitude of a 1 Hz sway (97 % at 0.5 Hz) and
+roughly halves the jitter of a still keypoint; ``beta = 4 s/m`` raises the cutoff with the
+speed, so a movement of about 1.5 m/s lags by about one frame. (``beta`` depends on the units
+of the signal: a value tuned for pixels, such as 0.01, would switch the speed adaptation off
+for meters.)
 """
 
 from __future__ import annotations
@@ -21,11 +28,12 @@ class OneEuroFilter:
     """Element-wise One-Euro filter.
 
     ``min_cutoff`` (Hz): cutoff at zero speed (lower = smoother, more lag at rest);
-    ``beta``: how fast the cutoff rises with speed (higher = less lag when moving; the speed is
-    in units of the signal per second, e.g. m/s); ``d_cutoff`` (Hz): cutoff of the speed
-    estimate. Call ``f(x, t)`` with increasing times ``t`` (seconds)."""
+    ``beta`` (s per unit of the signal, e.g. s/m): how fast the cutoff rises with speed (higher
+    = less lag when moving; the cutoff is ``min_cutoff + beta * speed``); ``d_cutoff`` (Hz):
+    cutoff of the speed estimate. The defaults suit coordinates in meters (see the module
+    docstring). Call ``f(x, t)`` with increasing times ``t`` (seconds)."""
 
-    def __init__(self, min_cutoff: float = 1.0, beta: float = 0.01, d_cutoff: float = 1.0):
+    def __init__(self, min_cutoff: float = 2.0, beta: float = 4.0, d_cutoff: float = 1.0):
         if min_cutoff <= 0 or d_cutoff <= 0 or beta < 0:
             raise ValueError("OneEuroFilter needs min_cutoff > 0, d_cutoff > 0 and beta >= 0")
         self.min_cutoff = float(min_cutoff)

@@ -246,7 +246,7 @@ class MMPoseDetector(Detector2D):
                 pose2d=model, pose2d_weights=weights or None, device=self.device,
                 det_model=det_model or None, det_weights=det_weights or None,
                 det_cat_ids=det_cat_ids)
-        except Exception as e:  # noqa: BLE001  (unknown model, download failure, ...)
+        except Exception as e:
             raise RuntimeError(
                 f"MMPose could not load model {model!r} ({type(e).__name__}: {e}). MMPose "
                 "downloads checkpoints from download.openmmlab.com; offline, pass local "
@@ -276,6 +276,8 @@ class MMPoseDetector(Detector2D):
         self._order = keypoint_order(self.format, names) if not self._forced else None
         self._n = n
         self._layout_known = True
+        if self.options:  # the layout became known after the first result
+            self.options["keypoint_format"] = self.format.key
 
     def detect(self, image_bgr: np.ndarray, t: float, cam_name: str) -> list[Person2D]:
         if self._inferencer is None:

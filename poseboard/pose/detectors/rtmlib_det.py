@@ -67,16 +67,24 @@ which ``MultiViewEstimator`` places in the world with PnP when only one camera c
 Its depth (and so the distance from the camera) is approximate, like MediaPipe's.
 
 **Model files.** rtmlib downloads the ONNX files on first use from download.openmmlab.com /
-huggingface.co into ``~/.cache/rtmlib/hub/checkpoints`` (``$TORCH_HOME`` / ``$XDG_CACHE_HOME``
-move it). When that fails the factories raise ``ModelUnavailable``; download the file
-elsewhere and pass its local path (``.onnx``, or the mmdeploy ``.zip``) as ``pose_model=`` /
-``det_model=``. Other factory options: ``backend`` ("onnxruntime", "opencv", "openvino"),
-``det_input_size`` / ``pose_input_size`` (taken from the ONNX file when a custom model is
-given), ``det_mode="multiclass"`` for an 80-class COCO YOLOX without built-in NMS, e.g. the
-YOLOX releases on GitHub (only class ``person_class`` = 0 is kept), ``det_score_thr`` /
-``nms_thr`` (RTMO, and YOLOX files without built-in NMS; for YOLOX files with built-in NMS,
-as rtmlib's mmdeploy files seem to be, rtmlib applies a fixed 0.3 threshold), ``rgb_input``,
-``score_scale`` and, for rtmpose3d, ``body_height``.
+huggingface.co into ``~/.cache/rtmlib/hub/checkpoints`` (``$TORCH_HOME/hub/checkpoints`` or
+``$XDG_CACHE_HOME/rtmlib/hub/checkpoints`` when set). A file put there by hand under the name
+of its URL (the ``.zip``, or the ``.onnx`` with the same base name) is used without a download.
+When the download fails the factories raise ``ModelUnavailable``; download the file elsewhere
+and pass its local path (``.onnx``, or the mmdeploy ``.zip``) as ``pose_model=`` /
+``det_model=`` (in the GUI: the **Pose model file** / **Person detector file** fields; empty =
+the default model of the mode). Other factory options: ``backend`` ("onnxruntime", "opencv",
+"openvino"), ``det_input_size`` / ``pose_input_size`` (taken from the ONNX file when a custom
+model is given), ``det_mode`` (see below), ``det_score_thr`` / ``nms_thr`` (RTMO, and YOLOX
+files without built-in NMS; for YOLOX files with built-in NMS, as rtmlib's mmdeploy files seem
+to be, rtmlib applies a fixed 0.3 threshold), ``rgb_input``, ``score_scale`` and, for
+rtmpose3d, ``body_height``.
+
+**Person classes.** A YOLOX file without built-in NMS (ONNX output ``(1, N, 5 + classes)``,
+e.g. the 80-class COCO YOLOX releases on GitHub) returns boxes of every class; rtmlib's default
+``det_mode="human"`` would pass cars, benches or dogs on as persons. Such files are therefore
+switched to ``det_mode="multiclass"`` automatically (read from the ONNX output shape), and only
+class ``person_class`` (0) is kept. Files with built-in NMS (last dimension 5) keep "human".
 """
 
 from __future__ import annotations
@@ -98,7 +106,7 @@ log = logging.getLogger(__name__)
 __all__ = ["KINDS", "MODES", "ModelUnavailable", "RTMLibDetector", "RTMPose3DDetector",
            "VITPOSE_ONNX", "canonical_name", "create_rtmo", "create_rtmpose",
            "create_rtmpose3d", "create_rtmpose_halpe26", "create_rtmw_wholebody",
-           "create_vitpose_onnx", "index_map", "resolve_device"]
+           "create_vitpose_onnx", "index_map", "keep_persons_only", "resolve_device"]
 
 MODES = ("balanced", "performance", "lightweight")
 RUNTIMES = ("onnxruntime", "opencv", "openvino")
@@ -284,6 +292,22 @@ def _local_model(path: str) -> str:
     return out
 
 
+# GUI field (Record tab) of each factory option that takes a model file
+_GUI_FIELDS = {"pose_model": "'Pose model file'", "det_model": "'Person detector file'"}
+
+
+def _rtmlib_cache_dir() -> str:
+    """rtmlib's download folder (rtmlib/tools/file.py ``download_checkpoint``)."""
+    try:
+        from rtmlib.tools.file import _get_rtmhub_dir
+
+        return os.path.join(_get_rtmhub_dir(), "checkpoints")
+    except Exception:  # noqa: BLE001  (other rtmlib version)
+        home = os.getenv("TORCH_HOME", os.path.join(os.getenv("XDG_CACHE_HOME", "~/.cache"),
+                                                    "rtmlib"))
+        return os.path.join(os.path.expanduser(home), "hub", "checkpoints")
+
+
 def _model_file(src: str, what: str, option: str, label: str) -> str:
     if _is_url(src):
         try:
@@ -292,8 +316,9 @@ def _model_file(src: str, what: str, option: str, label: str) -> str:
             raise ModelUnavailable(
                 f"{label}: cannot download the {what} model {src} ({type(e).__name__}: {e}). "
                 "rtmlib downloads its models from download.openmmlab.com / huggingface.co; if "
-                f"these hosts are blocked, download the file elsewhere and pass its local path "
-                f"as {option}=...") from e
+                "these hosts are blocked, download the file elsewhere and select it as "
+                f"{_GUI_FIELDS.get(option, option)} (Python: {option}=<path>), or copy it "
+                f"unchanged into {_rtmlib_cache_dir()} (rtmlib's download cache).") from e
     path = os.path.expanduser(str(src))
     if not os.path.isfile(path):
         raise ModelUnavailable(f"{label}: {what} model file not found: {path}")
@@ -308,6 +333,29 @@ def _onnx_input_hw(model) -> tuple[int, int] | None:
     except Exception:  # noqa: BLE001  (other runtime, dynamic axes, ...)
         return None
     return (h, w) if h > 0 and w > 0 else None
+
+
+def _onnx_output_last_dim(model) -> int | None:
+    """Last dimension of the model's first ONNX output, if the ONNX Runtime session tells it."""
+    try:
+        n = model.session.get_outputs()[0].shape[-1]
+    except Exception:  # noqa: BLE001  (other runtime, no session, ...)
+        return None
+    return n if isinstance(n, int) and not isinstance(n, bool) else None  # symbolic: str
+
+
+def keep_persons_only(det) -> str:
+    """Make a YOLOX file without built-in NMS return class ids, so ``person_boxes`` keeps only
+    persons: rtmlib's ``det_mode="human"`` returns the boxes of every class for such files (see
+    the module docstring). Files with built-in NMS (output ``(1, N, 5)``) and runtimes that do
+    not tell the output shape are left alone (rtmlib's "multiclass" mode fails on files with
+    NMS). Returns the resulting ``det_mode``."""
+    mode = getattr(det, "det_mode", "human")
+    if mode == "human":
+        n = _onnx_output_last_dim(det)
+        if n is not None and n != 5:  # rtmlib: 4 or > 5 = no built-in NMS
+            det.det_mode = mode = "multiclass"
+    return mode
 
 
 def _simcc_z_bins(model) -> float | None:
@@ -598,6 +646,8 @@ def _create(key: str, mode: str = "balanced", device: str = "auto",
             body_height: float | None = None) -> RTMLibDetector:
     kind = KINDS[key]
     label = _registry_label(key, kind.label)
+    det_model = (str(det_model).strip() or None) if det_model else None  # "" = the default
+    pose_model = (str(pose_model).strip() or None) if pose_model else None
     try:
         import rtmlib
     except ImportError as e:
@@ -626,6 +676,7 @@ def _create(key: str, mode: str = "balanced", device: str = "auto",
             det.score_thr = float(det_score_thr)
         if nms_thr is not None:
             det.nms_thr = float(nms_thr)
+        keep_persons_only(det)
 
     pose_cls = getattr(rtmlib, kind.pose_class)
     size = tuple(pose_input_size or def_pose_size)

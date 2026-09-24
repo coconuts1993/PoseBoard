@@ -15,13 +15,18 @@
 * When no 3D is possible, ``process`` returns None (as before); use
   ``MultiViewEstimator(create_detector("mediapipe"))`` to get ``2d_only`` poses instead.
 
-This module also owns the model files (``MODEL_DIR``, ``ensure_model``).
+This module also owns the model files (``MODEL_DIR``, ``BUNDLED_MODEL_DIR``, ``ensure_model``).
+``MODEL_DIR`` is PoseBoard's writable models folder, shared by the backends that download or
+look up model files (MediaPipe, YOLO, MoveNet, OpenPose, Keypoint R-CNN); the packaged exe sets
+it to ``models`` next to the exe.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import shutil
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -32,8 +37,8 @@ from poseboard.pose.detectors.base import Person2D
 from poseboard.pose.formats import MEDIAPIPE33
 from poseboard.pose.multiview import MultiViewEstimator, single_view_lift, world_view
 
-__all__ = ["MP_NAMES", "MP_SKELETON", "MODEL_URLS", "MODEL_DIR", "MediaPipePose", "ensure_model",
-           "model_path", "single_view_lift", "world_view"]
+__all__ = ["BUNDLED_MODEL_DIR", "MP_NAMES", "MP_SKELETON", "MODEL_URLS", "MODEL_DIR",
+           "MediaPipePose", "ensure_model", "model_path", "single_view_lift", "world_view"]
 
 log = logging.getLogger(__name__)
 
@@ -47,10 +52,16 @@ MODEL_URLS = {
 }
 
 MODEL_DIR = Path(__file__).resolve().parents[2] / "models"
+# Read-only folder with bundled .task files (the packaged exe), looked up before MODEL_DIR
+BUNDLED_MODEL_DIR: Path | None = None
 
 
 def model_path(variant: str = "full") -> Path:
-    return MODEL_DIR / f"pose_landmarker_{variant}.task"
+    """The bundled model file if there is one, else its place in ``MODEL_DIR``."""
+    name = f"pose_landmarker_{variant}.task"
+    if BUNDLED_MODEL_DIR is not None and (Path(BUNDLED_MODEL_DIR) / name).is_file():
+        return Path(BUNDLED_MODEL_DIR) / name
+    return MODEL_DIR / name
 
 
 def ensure_model(variant: str = "full", timeout: float = 30.0) -> Path:
@@ -60,18 +71,21 @@ def ensure_model(variant: str = "full", timeout: float = 30.0) -> Path:
     if path.exists():
         return path
     url = MODEL_URLS[variant]
-    tmp = path.with_suffix(".part")
+    tmp = None
     log.info("downloading %s", url)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with urllib.request.urlopen(url, timeout=timeout) as r, open(tmp, "wb") as f:
+        # a temporary file of its own: two downloads at once never write the same file
+        fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".part", dir=path.parent)
+        with os.fdopen(fd, "wb") as f, urllib.request.urlopen(url, timeout=timeout) as r:
             shutil.copyfileobj(r, f, 1 << 16)
-        tmp.replace(path)
+        os.replace(tmp, path)
     except Exception as e:  # noqa: BLE001
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
         raise RuntimeError(
             f"Cannot download the MediaPipe model ({e}).\nDownload it on any computer from\n"
             f"  {url}\nand save it as\n  {path}\n(or copy that file from the packaged PoseBoard "

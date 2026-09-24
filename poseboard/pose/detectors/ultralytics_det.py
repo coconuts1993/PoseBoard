@@ -59,7 +59,8 @@ import numpy as np
 from poseboard.pose.detectors.base import Detector2D, Person2D, keypoint_bbox
 from poseboard.pose.formats import COCO17, KeypointFormat, get_format
 
-__all__ = ["FAMILIES", "RELEASES_URL", "SIZES", "YoloPoseDetector", "create", "models_dir",
+__all__ = ["FAMILIES", "MIN_ULTRALYTICS", "RELEASES_URL", "SIZES", "YoloPoseDetector",
+           "check_ultralytics_version", "create", "models_dir",
            "people_from_result", "resolve_device", "resolve_weights", "weights_name"]
 
 log = logging.getLogger(__name__)
@@ -75,6 +76,8 @@ _VERSION_ALIASES = {
 # "yolo11n", "yolo11n-pose", "yolo11n-pose.pt" (but not "yolo11n.pt": that is a detection model)
 _NAME_RE = re.compile(r"^(yolo11|yolov8|yolo26)([nsmlx])(?:-pose(?:\.pt)?)?$", re.IGNORECASE)
 RELEASES_URL = "https://github.com/ultralytics/assets/releases"
+# First ultralytics release that knows each family (older ones cannot load its weights)
+MIN_ULTRALYTICS = {"yolo26": (8, 4)}
 
 
 # ------------------------------------------------------------------ weights and device
@@ -83,6 +86,25 @@ def models_dir() -> Path:
     from poseboard.pose import mediapipe_backend as mpb  # MODEL_DIR is patched in the frozen app
 
     return Path(mpb.MODEL_DIR)
+
+
+def check_ultralytics_version(name: str | None, installed: str | None = None) -> None:
+    """Raise RuntimeError when the installed ultralytics is too old for the weights ``name``
+    (e.g. YOLO26 needs ultralytics >= 8.4); unknown version strings are not checked."""
+    if not name:
+        return
+    need = next((v for fam, v in MIN_ULTRALYTICS.items() if name.lower().startswith(fam)), None)
+    if need is None:
+        return
+    if installed is None:
+        import ultralytics
+
+        installed = str(getattr(ultralytics, "__version__", ""))
+    m = re.match(r"^(\d+)\.(\d+)", str(installed).strip())
+    if m and (int(m.group(1)), int(m.group(2))) < need:
+        fam = name.split("-")[0].rstrip("nsmlx").upper()
+        raise RuntimeError(f"{fam} needs ultralytics>={need[0]}.{need[1]} (installed: "
+                           f"{installed}): pip install -U ultralytics")
 
 
 def _version_key(version) -> str:
@@ -293,6 +315,7 @@ class YoloPoseDetector(Detector2D):
         from ultralytics import YOLO  # heavy (PyTorch): only when this backend is used
 
         _disable_analytics()
+        check_ultralytics_version(weights_name(model, version))  # before any download
         self.device = resolve_device(device)
         self.weights_path = resolve_weights(model, version, weights_dir)
         self.format = get_format(keypoint_format or "coco17")

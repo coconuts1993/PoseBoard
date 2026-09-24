@@ -29,8 +29,13 @@ htmlcov/
 Thumbs.db
 desktop.ini
 
-# PoseBoard data
+# PoseBoard data (model files are downloaded on first use)
 models/*.task
+models/*.pt
+models/*.pth
+models/*.onnx
+models/*.caffemodel
+models/openpose/
 *.part
 recordings/
 poseboard.log

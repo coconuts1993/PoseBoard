@@ -349,3 +349,150 @@ def test_estimator_info_and_close():
     assert est.skeleton == list(FORMATS["halpe26"].skeleton) and est.name == "fake"
     est.close()
     assert det.closed
+
+
+# ---------------------------------------------------------------- spotter next to the board
+def _spotter(angle_deg=200.0, dist=0.55):
+    a = np.deg2rad(angle_deg)
+    return standing_person("coco17", offset=(0.8 + dist * np.cos(a), 0.5 + dist * np.sin(a), 0.0))
+
+
+def test_spotter_next_to_the_board_does_not_replace_the_tracked_subject():
+    """The subject's ankles become unsure in one camera (feet cut off, board edge, low scores)
+    while a spotter stands next to the board: the tracked subject is kept, instead of
+    triangulating two different people (which gave a plausible reprojection error)."""
+    cams = cameras(2)
+    fmt = FORMATS["coco17"]
+    feet = [fmt.index(n) for n in ("left_ankle", "right_ankle")]
+    spot = _spotter()
+    state = {"weak_feet": False, "hidden": False}
+
+    def script(cam, t, img):
+        people = []
+        if not (state["hidden"] and cam == "cam0"):
+            p = project_person(cams[cam], TRUTH, "coco17")
+            if state["weak_feet"] and cam == "cam0":
+                p.scores[feet] = 0.25  # below FOOT_MIN_SCORE: no foot point
+            people.append(p)
+        people.append(project_person(cams[cam], spot, "coco17"))
+        return people
+
+    board = lambda: (BOARD, BoardGeometry())  # noqa: E731
+    est = estimator(script, board_provider=board)
+    pose = est.process(frames_for(cams), cams)
+    np.testing.assert_allclose(pose.keypoints, TRUTH, atol=1e-6)
+    state["weak_feet"] = True
+    pose = est.process(frames_for(cams, t=1.1), cams)
+    assert pose.mode == MODE_TRIANGULATED and pose.views_used == ["cam0", "cam1"]
+    np.testing.assert_allclose(pose.per_camera_2d["cam0"].keypoints,
+                               cams["cam0"].project(TRUTH), atol=1e-6)
+    np.testing.assert_allclose(pose.keypoints[:-2], TRUTH[:-2], atol=1e-6)
+
+    # the subject is hidden in cam0 and only the spotter is detected there: not used
+    est = estimator(script, board_provider=board)
+    state.update(weak_feet=False)
+    est.process(frames_for(cams), cams)
+    state["hidden"] = True
+    pose = est.process(frames_for(cams, t=1.1), cams)
+    assert "cam0" not in pose.per_camera_2d and pose.mode == MODE_2D_ONLY
+    assert any(n.startswith("cam0: nobody detected on the board") for n in pose.notes)
+    np.testing.assert_allclose(pose.per_camera_2d["cam1"].keypoints, cams["cam1"].project(TRUTH))
+
+
+def test_select_subject_alone_or_tracked():
+    """A person detected alone is used only on the board, tracked, or when the feet are hidden
+    and nobody was tracked; without a board outline anybody alone is the subject."""
+    cam = cameras(1)["cam0"]
+    fmt = FORMATS["coco17"]
+    poly = board_polygon_px(BOARD, cam, BoardGeometry())
+    subject = project_person(cam, TRUTH, fmt)
+    spotter = project_person(cam, _spotter(), fmt)
+    assert select_subject([subject], board_polygon_px=poly, fmt=fmt) is subject
+    assert select_subject([spotter], board_polygon_px=poly, fmt=fmt) is None
+    assert select_subject([spotter], fmt=fmt) is spotter  # no board: anybody alone
+    # the spotter's box overlaps the subject's previous box a lot: tracked, if the feet allow
+    assert select_subject([spotter], board_polygon_px=poly, previous_bbox=spotter.box(),
+                          fmt=fmt) is spotter
+    far = project_person(cam, standing_person("coco17", offset=(-0.6, 1.4, 0.0)), fmt)
+    assert select_subject([far], board_polygon_px=poly, previous_bbox=far.box(), fmt=fmt) is None
+    # feet hidden: accepted when nobody was tracked, or when it is the tracked person
+    lo = [fmt.index(n) for n in ("left_ankle", "right_ankle")]
+    hidden = project_person(cam, _spotter(), fmt)
+    hidden.scores[lo] = 0.1
+    assert select_subject([hidden], board_polygon_px=poly, fmt=fmt) is hidden
+    assert select_subject([hidden], board_polygon_px=poly, previous_bbox=subject.box(),
+                          fmt=fmt) is None
+    subj_hidden = project_person(cam, TRUTH, fmt)
+    subj_hidden.scores[lo] = 0.1
+    assert select_subject([subj_hidden, spotter], board_polygon_px=poly,
+                          previous_bbox=subject.box(), fmt=fmt) is subj_hidden
+    # without tracking the spotter near the board is still preferred over a far bystander
+    assert select_subject([far, spotter], board_polygon_px=poly, fmt=fmt) is spotter
+
+
+# ---------------------------------------------------------------- world camera not running
+def test_world_camera_not_running_gives_no_3d_in_another_frame():
+    """Without extrinsics the board is in the world camera's frame: when that camera is not
+    running, no other camera may lift the pose (it would be in another frame)."""
+    c = cameras(2)
+    cams = {"cam0": no_ext(c["cam0"])}  # only cam0 runs; the board was registered in cam1
+    est = estimator(Scene(c, TRUTH, "coco17", with_3d=True), provides_3d=True)
+    est.world_camera = "cam1"
+    pose = est.process({"cam0": (1.0, IMG)}, cams)
+    assert pose.mode == MODE_2D_ONLY and np.all(np.isnan(pose.keypoints))
+    assert set(pose.per_camera_2d) == {"cam0"}
+    assert any("world camera cam1" in n and "not running" in n for n in pose.notes)
+    from poseboard.pose.multiview import world_view
+    assert world_view(cams, "cam1") == "cam1" and world_view(cams) == "cam0"
+    assert world_view(c, "cam1") is None  # extrinsics: the checkerboard frame
+
+
+# ---------------------------------------------------------------- too few triangulated points
+def test_nothing_triangulated_falls_back_to_single_view_or_2d_only():
+    """The second camera's keypoints are all below min_score: not an all-NaN "triangulated"
+    pose, but the single-view lift of the confident camera (or 2D only without a 3D skeleton)."""
+    cams = cameras(2)
+    scene = Scene(cams, TRUTH, "coco17", with_3d=True)
+
+    def script(cam, t, img):
+        (p,) = scene(cam, t, img)
+        p.scores[:] = 0.9 if cam == "cam0" else 0.4
+        return [p]
+
+    pose = estimator(script, provides_3d=True, min_score=0.5).process(frames_for(cams), cams)
+    assert pose.mode == MODE_SINGLE_VIEW_3D and pose.views_used == ["cam0"]
+    np.testing.assert_allclose(pose.keypoints, TRUTH, atol=1e-3)
+    assert any("single-view 3D from cam0" in n for n in pose.notes)
+    pose = estimator(script, min_score=0.5).process(frames_for(cams), cams)
+    assert pose.mode == MODE_2D_ONLY and np.all(np.isnan(pose.keypoints))
+    assert any("no keypoint was seen confidently by two cameras" in n for n in pose.notes)
+    assert estimator(script, min_score=0.5, emit_2d_only=False).process(
+        frames_for(cams), cams) is None
+    # enough triangulated keypoints: triangulation is kept
+    pose = estimator(script, provides_3d=True, min_score=0.3).process(frames_for(cams), cams)
+    assert pose.mode == MODE_TRIANGULATED
+
+
+# ---------------------------------------------------------------- One-Euro defaults (meters)
+def test_one_euro_defaults_follow_fast_movements_and_keep_sway():
+    """Default parameters on coordinates in meters at 30 Hz: a 0.3 m rise in 0.2 s (1.5 m/s)
+    lags by at most one frame, a 0.5-1 Hz sway of 2 cm keeps its amplitude, and the jitter of
+    a still keypoint is reduced."""
+    fs = 30.0
+    t = np.arange(0, 6, 1 / fs)
+
+    def run(x):
+        f = OneEuroFilter()
+        return np.array([f(v, tt) for v, tt in zip(x, t)])
+
+    rise = np.clip((t - 2.0) / 0.2, 0, 1) * 0.3
+    y = run(rise)
+    lag = t[np.argmax(y >= 0.15)] - t[np.argmax(rise >= 0.15)]
+    assert lag <= 1.01 / fs, lag
+    assert y[np.argmin(abs(t - 2.2))] > 0.25  # the old beta=0.01 reached 0.14 m
+    for freq, kept in ((0.5, 0.95), (1.0, 0.88)):
+        s = 0.02 * np.sin(2 * np.pi * freq * t)
+        ys = run(s)[len(t) // 2:]
+        assert (ys.max() - ys.min()) / 2 > kept * 0.02, (freq, ys.max())
+    noise = 0.005 * np.random.default_rng(0).standard_normal(len(t))
+    assert np.std(run(1.0 + noise)[30:]) < 0.6 * np.std(noise[30:])

@@ -1,4 +1,5 @@
-"""Drawing on camera frames: clicked landmarks, board outline/sensors/axes, COP and force, skeleton, COM."""
+"""Drawing on camera frames: clicked landmarks, board outline/sensors/axes, COP and force,
+skeleton (any keypoint format), COM."""
 
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ import numpy as np
 from poseboard.calibration import CameraCalibration
 from poseboard.geometry import LANDMARK_NAMES, BoardGeometry, BoardPose
 from poseboard.pose.base import Pose3D
+from poseboard.pose.formats import FORMATS
 
 CLICK_COLORS = [(0, 0, 255), (0, 200, 255), (0, 255, 0), (255, 128, 0), (255, 0, 255)]
 
@@ -91,21 +93,69 @@ def draw_cop(img: np.ndarray, cam: CameraCalibration, board: BoardPose,
                     0.6, (255, 80, 0), 2, cv2.LINE_AA)
 
 
+SIDE_COLORS = {"left": (255, 160, 60), "right": (60, 160, 255), "center": (0, 230, 0)}  # BGR
+POINT_COLOR = (0, 255, 255)
+
+
+def _side(name: str) -> str:
+    n = name.lower()
+    if n.startswith(("left_", "l_")) or (name[:1] == "L" and name[1:2].isupper()):
+        return "left"  # left_knee, l_knee, LKnee
+    if n.startswith(("right_", "r_")) or (name[:1] == "R" and name[1:2].isupper()):
+        return "right"
+    return "center"
+
+
+def _is_detail(name: str) -> bool:
+    """Face and hand points of whole-body formats: drawn smaller."""
+    return name.startswith("face_") or "_hand_" in name
+
+
+def pose_skeleton(pose: Pose3D, skeleton: list[tuple[str, str]] | None = None
+                  ) -> list[tuple[str, str]]:
+    """The bone list to draw for ``pose``: ``skeleton`` if given, else the skeleton of the pose's
+    keypoint format (``Pose3D.format_key``, or a format whose names match exactly), else []."""
+    if skeleton:
+        return list(skeleton)
+    fmt = FORMATS.get(getattr(pose, "format_key", None) or "")
+    if fmt is None:
+        names = tuple(pose.names)
+        fmt = next((f for f in FORMATS.values() if f.names == names), None)
+    return list(fmt.skeleton) if fmt is not None else []
+
+
 def draw_pose(img: np.ndarray, cam: CameraCalibration, cam_name: str, pose: Pose3D,
-              skeleton: list[tuple[str, str]], board: BoardPose | None,
-              com_world: np.ndarray | None) -> None:
-    if cam_name in pose.per_camera_2d:
-        pts2d = pose.per_camera_2d[cam_name].keypoints
+              skeleton: list[tuple[str, str]] | None = None, board: BoardPose | None = None,
+              com_world: np.ndarray | None = None, min_score: float = 0.0) -> None:
+    """Skeleton of ``pose`` in camera ``cam_name``: the 2D keypoints detected in that camera
+    (``per_camera_2d``, drawn for every mode, also ``2d_only``) or else the 3D keypoints projected
+    into it; bones from ``skeleton`` or the pose's keypoint format (left side blue, right side
+    orange). 2D keypoints with a score below ``min_score`` are not drawn. Then the COM and its
+    projection on the board."""
+    p2 = pose.per_camera_2d.get(cam_name) if pose.per_camera_2d else None
+    if p2 is not None:
+        pts2d = np.asarray(p2.keypoints, np.float64).reshape(-1, 2)
+        sc = (np.ones(len(pts2d)) if p2.scores is None
+              else np.asarray(p2.scores, np.float64).reshape(-1))
+        ok = np.all(np.isfinite(pts2d), axis=1) & (np.nan_to_num(sc, nan=0.0) >= min_score)
     else:
         pts2d = project_world(cam, pose.keypoints)
-    idx = {n: i for i, n in enumerate(pose.names)}
-    for a, b in skeleton:
-        if a in idx and b in idx:
-            _line(img, pts2d[idx[a]], pts2d[idx[b]], (0, 230, 0), 2)
-    for q in pts2d:
-        p = _p(q)
+        ok = np.all(np.isfinite(pts2d), axis=1)
+    names = list(pose.names)
+    if len(names) != len(pts2d):  # a plugin's 2D layout differs from its 3D names
+        names = [f"kp{i}" for i in range(len(pts2d))]
+    idx = {n: i for i, n in enumerate(names)}
+    for a, b in pose_skeleton(pose, skeleton):
+        i, j = idx.get(a), idx.get(b)
+        if i is None or j is None or not (ok[i] and ok[j]):
+            continue
+        sa, sb = _side(a), _side(b)
+        color = SIDE_COLORS[sa if sa == sb else "center"]
+        _line(img, pts2d[i], pts2d[j], color, 1 if _is_detail(a) or _is_detail(b) else 2)
+    for i, q in enumerate(pts2d):
+        p = _p(q) if ok[i] else None
         if p:
-            cv2.circle(img, p, 3, (0, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(img, p, 1 if _is_detail(names[i]) else 3, POINT_COLOR, -1, cv2.LINE_AA)
     if com_world is not None:
         pts = [com_world]
         if board is not None:
@@ -124,3 +174,17 @@ def draw_pose(img: np.ndarray, cam: CameraCalibration, cam_name: str, pose: Pose
             cv2.circle(img, q, 9, (0, 140, 255), 2, cv2.LINE_AA)
             cv2.putText(img, "COM", (q[0] + 10, q[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                         (0, 140, 255), 2, cv2.LINE_AA)
+
+
+def draw_caption(img: np.ndarray, text: str, line: int = 0) -> None:
+    """A short text on a dark band at the bottom-left of the image (``line`` 0 = lowest)."""
+    if not text:
+        return
+    scale = max(0.45, min(1.0, img.shape[1] / 1600))
+    (w, h), base = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, 1)
+    y = img.shape[0] - 10 - line * (h + base + 8)
+    x0, y0 = 6, y - h - 4
+    cv2.rectangle(img, (x0, y0), (min(img.shape[1] - 1, x0 + w + 8), y + base + 2), (30, 30, 30),
+                  -1)
+    cv2.putText(img, text, (x0 + 4, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (240, 240, 240), 1,
+                cv2.LINE_AA)

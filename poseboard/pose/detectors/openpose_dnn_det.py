@@ -14,7 +14,7 @@ Model files (two files per model; option ``model`` = ``body25`` or ``coco18``; `
 model      prototxt (network definition)   caffemodel (weights)            size
 =========  ==============================  ==============================  ========
 body25     body_25/pose_deploy.prototxt    pose_iter_584000.caffemodel     ~105 MB
-coco18     coco/pose_deploy_linevec.prototxt  pose_iter_440000.caffemodel  ~200 MB
+coco18     coco/pose_deploy_linevec.prototxt  pose_iter_440000.caffemodel  ~209 MB
 =========  ==============================  ==============================  ========
 
 * The prototxt files are in the OpenPose GitHub repository (``models/pose/...``). If option
@@ -33,9 +33,10 @@ coco18     coco/pose_deploy_linevec.prototxt  pose_iter_440000.caffemodel  ~200 
   - community mirrors, e.g. the Hugging Face repositories ``camenduru/openpose`` or
     ``gaijingeek/openpose-models`` (not official: check the file size above).
 
-  Put the file into ``<models>/openpose/<body_25|coco>/`` (``<models>`` = the PoseBoard models
-  folder, see ``poseboard.pose.mediapipe_backend.MODEL_DIR``) or select it with option
-  ``caffemodel``.
+  Check the download: MD5 78287b57cf85fa89c03f1393d368e5b7 (BODY_25) /
+  5156d31f670511fce9b4e28b403f2939 (COCO), from OpenPose's ``CMakeLists.txt``. Put the file
+  into ``<models>/openpose/<body_25|coco>/`` (``<models>`` = the PoseBoard models folder, see
+  ``poseboard.pose.mediapipe_backend.MODEL_DIR``) or select it with option ``caffemodel``.
 
 OpenCV 5 removed the Caffe importer (``cv2.dnn.readNetFromCaffe``). With OpenCV 4.x the files
 are loaded with ``readNetFromCaffe``; otherwise (or with ``engine="onnx"``) this module converts
@@ -62,8 +63,9 @@ Coordinates: heatmap cell ``i`` covers input pixels ``[8 i, 8 i + 8)``; its cent
 back through the resize to ORIGINAL image pixels (continuous coordinates, like the other
 backends: ``x = (i + dx + 0.5) * stride / scale_x``).
 
-Scores: the heatmap value at the peak. OpenPose regresses Gaussians of peak 1, so the value is
-already roughly a confidence in 0..1; it is only clipped to 0..1. Keypoints whose peak is below
+Scores: the heatmap value at the (sub-cell) peak, i.e. the maximum of the fitted parabola, as
+OpenPose reads it from the upsampled heatmap. OpenPose regresses Gaussians of peak 1, so the
+value is already roughly a confidence in 0..1; it is only clipped to 0..1. Keypoints whose peak is below
 ``min_keypoint_score`` (0.1, as in the OpenCV OpenPose sample) are NaN with score 0; fewer than
 ``min_keypoints`` (3) found keypoints means no person. ``Person2D.score`` = mean score of the
 found keypoints.
@@ -106,7 +108,7 @@ __all__ = ["MODELS", "OPENPOSE_COMMIT", "OpenPoseDnnDetector", "OpenPoseModel", 
 
 log = logging.getLogger(__name__)
 
-# OpenPose GitHub commit the prototxt files are downloaded from (master, 2024).
+# OpenPose GitHub commit (master) the prototxt files are downloaded from.
 OPENPOSE_COMMIT = "5c5d96523ef917bd30301245fdc8343937cae48d"
 _RAW_URL = ("https://raw.githubusercontent.com/CMU-Perceptual-Computing-Lab/openpose/"
             f"{OPENPOSE_COMMIT}/models/pose/")
@@ -128,6 +130,7 @@ class OpenPoseModel:
     caffemodel: str
     prototxt_sha256: str
     caffemodel_mb: int
+    caffemodel_md5: str  # from OpenPose's CMakeLists.txt (download_model), to check a download
     n_pafs: int
     opencv_mirror: str = ""
 
@@ -148,10 +151,12 @@ class OpenPoseModel:
 MODELS: dict[str, OpenPoseModel] = {m.key: m for m in (
     OpenPoseModel("body25", "BODY_25", BODY25, "body_25", "pose_deploy.prototxt",
                   "pose_iter_584000.caffemodel",
-                  "44d6ed3a5268d8d41ca59b3a040491277d876975c3234d82cf7ec0539b4b1f61", 105, 52),
+                  "44d6ed3a5268d8d41ca59b3a040491277d876975c3234d82cf7ec0539b4b1f61", 105,
+                  "78287b57cf85fa89c03f1393d368e5b7", 52),
     OpenPoseModel("coco18", "COCO", COCO18, "coco", "pose_deploy_linevec.prototxt",
                   "pose_iter_440000.caffemodel",
-                  "17051b87f709aa094e09c5da7b78e9016a1f37b2b452ed1f190fe74cce70b1ad", 200, 38,
+                  "17051b87f709aa094e09c5da7b78e9016a1f37b2b452ed1f190fe74cce70b1ad", 209,
+                  "5156d31f670511fce9b4e28b403f2939", 38,
                   "https://dl.opencv.org/models/openpose_pose_coco.caffemodel"),
 )}
 _ALIASES = {"body25": "body25", "body_25": "body25", "coco": "coco18", "coco18": "coco18",
@@ -170,9 +175,10 @@ def model_key(model) -> str:
 # ------------------------------------------------------------------ model files
 def models_dir() -> Path:
     """``<PoseBoard models folder>/openpose``."""
-    from poseboard.pose import mediapipe_backend as mpb  # MODEL_DIR is patched in the frozen app
+    # imported here: MODEL_DIR is patched in the frozen app
+    from poseboard.pose import mediapipe_backend
 
-    return Path(mpb.MODEL_DIR) / "openpose"
+    return Path(mediapipe_backend.MODEL_DIR) / "openpose"
 
 
 def _sha256(path: Path) -> str:
@@ -194,7 +200,7 @@ def _download_prototxt(spec: OpenPoseModel, target: Path, timeout: float = 30.0)
         if digest != spec.prototxt_sha256:
             raise RuntimeError(f"SHA-256 mismatch ({digest})")
         tmp.replace(target)
-    except Exception as e:  # noqa: BLE001  (offline, proxy, disk, checksum)
+    except Exception as e:
         try:
             tmp.unlink()
         except OSError:
@@ -224,8 +230,9 @@ def resolve_model_files(model: str = "body25", prototxt: str | Path = "",
         if weights is None:
             mirror = f", OpenCV's mirror {spec.opencv_mirror}" if spec.opencv_mirror else ""
             raise FileNotFoundError(
-                f"OpenPose {spec.name} weights {spec.caffemodel} (~{spec.caffemodel_mb} MB) not "
-                f"found. Select the file with option 'caffemodel' or put it into\n  {base}\n"
+                f"OpenPose {spec.name} weights {spec.caffemodel} (~{spec.caffemodel_mb} MB, MD5 "
+                f"{spec.caffemodel_md5}) not found. Select the file with option 'caffemodel' or "
+                f"put it into\n  {base}\n"
                 + _WHERE.format(folder=spec.folder, caffemodel=spec.caffemodel,
                                 opencv_mirror=mirror))
     elif not weights.is_file():
@@ -245,7 +252,13 @@ def resolve_model_files(model: str = "body25", prototxt: str | Path = "",
 
 
 # ------------------------------------------------------------------ Caffe prototxt (text format)
-_TOKEN_RE = re.compile(r"""\s*(?:(\#[^\n]*)|"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|([{}:<>\[\],;])|([^\s{}:<>\[\],;"'\#]+))""")
+_TOKEN_RE = re.compile(r"""\s*(?:
+    (\#[^\n]*)                        # comment
+  | "((?:[^"\\]|\\.)*)"                # "string"
+  | '((?:[^'\\]|\\.)*)'                # 'string'
+  | ([{}:<>\[\],;])                   # punctuation
+  | ([^\s{}:<>\[\],;"'\#]+)            # name, number or enum value
+)""", re.VERBOSE)
 
 
 def _tokens(text: str):
@@ -405,6 +418,13 @@ def _blob(buf) -> np.ndarray:
 def parse_caffemodel(data: bytes | bytearray | memoryview) -> dict[str, list[np.ndarray]]:
     """Weights of a binary ``.caffemodel``: {layer name: [blobs]} (layers with blobs only;
     both the current ``layer`` and the legacy V1 ``layers`` messages are read)."""
+    try:
+        return _parse_caffemodel(data)
+    except IndexError as e:  # a varint running past the end
+        raise ValueError("caffemodel: truncated or not a Caffe model file") from e
+
+
+def _parse_caffemodel(data) -> dict[str, list[np.ndarray]]:
     out: dict[str, list[np.ndarray]] = {}
     for num, wt, val in _fields(data):
         if wt != 2 or num not in (100, 2):  # LayerParameter layer = 100; V1 layers = 2
@@ -614,6 +634,8 @@ def caffe_to_onnx(prototxt_text: str, weights: dict[str, list[np.ndarray]],
             for top in tops:
                 g.names[top] = ins[0]
                 produced.append(top)
+                if top in bottoms:
+                    consumed.discard(top)
             continue
         if len(tops) != 1:
             raise ValueError(f"Caffe layer {lname!r} ({typ}) must have one top")
@@ -781,7 +803,7 @@ def preprocess(image_bgr: np.ndarray, input_size: int = 368, max_width_factor: f
     normalized as OpenPose: ``value / 256 - 0.5``. ``scale_*`` = net pixels per image pixel."""
     h, w = image_bgr.shape[:2]
     s = min(input_size / h, max_width_factor * input_size / w)
-    new_w, new_h = max(1, int(round(w * s))), max(1, int(round(h * s)))
+    new_w, new_h = max(1, round(w * s)), max(1, round(h * s))
     net_w = int(math.ceil(new_w / multiple) * multiple)
     net_h = int(math.ceil(new_h / multiple) * multiple)
     interp = cv2.INTER_AREA if s < 1.0 else cv2.INTER_CUBIC
@@ -793,15 +815,19 @@ def preprocess(image_bgr: np.ndarray, input_size: int = 368, max_width_factor: f
             (new_w / w, new_h / h), (new_h, new_w))
 
 
-def _subcell(left: float, center: float, right: float) -> float:
-    """Offset (-0.5..0.5) of the maximum of a parabola through 3 samples; on the log values
-    when all are positive (exact for a Gaussian peak)."""
-    if left > 1e-6 and center > 1e-6 and right > 1e-6:
-        left, center, right = math.log(left), math.log(center), math.log(right)
-    den = left - 2.0 * center + right
+def _subcell(left: float, center: float, right: float) -> tuple[float, float]:
+    """(offset -0.5..0.5, peak value / center value) of the parabola through 3 samples; fitted
+    on the log values when all are positive (exact for a Gaussian peak)."""
+    use_log = left > 1e-6 and center > 1e-6 and right > 1e-6
+    lf, cf, rf = (math.log(left), math.log(center), math.log(right)) if use_log else \
+        (left, center, right)
+    den = lf - 2.0 * cf + rf
     if den >= 0.0:
-        return 0.0
-    return float(np.clip(0.5 * (left - right) / den, -0.5, 0.5))
+        return 0.0, 1.0
+    off = float(np.clip(0.5 * (lf - rf) / den, -0.5, 0.5))
+    rise = -0.25 * (lf - rf) * off  # parabola value at ``off`` minus the center value
+    gain = math.exp(rise) if use_log else ((center + rise) / center if center > 0 else 1.0)
+    return off, gain
 
 
 def decode_heatmaps(heatmaps: np.ndarray, n_parts: int, net_hw: tuple[int, int],
@@ -821,8 +847,8 @@ def decode_heatmaps(heatmaps: np.ndarray, n_parts: int, net_hw: tuple[int, int],
     net_h, net_w = net_hw
     stride_x, stride_y = net_w / ow, net_h / oh
     ch, cw = content_hw if content_hw is not None else (net_h, net_w)
-    vh = min(oh, max(1, int(math.ceil(ch / stride_y))))
-    vw = min(ow, max(1, int(math.ceil(cw / stride_x))))
+    vh = min(oh, max(1, math.ceil(ch / stride_y)))
+    vw = min(ow, max(1, math.ceil(cw / stride_x)))
     kp = np.full((n_parts, 2), np.nan)
     sc = np.zeros(n_parts)
     for k in range(n_parts):
@@ -832,11 +858,11 @@ def decode_heatmaps(heatmaps: np.ndarray, n_parts: int, net_hw: tuple[int, int],
         val = float(m[iy, ix])
         if not np.isfinite(val) or val < min_score:
             continue
-        dx = _subcell(m[iy, ix - 1], val, m[iy, ix + 1]) if 0 < ix < vw - 1 else 0.0
-        dy = _subcell(m[iy - 1, ix], val, m[iy + 1, ix]) if 0 < iy < vh - 1 else 0.0
+        dx, gx = _subcell(m[iy, ix - 1], val, m[iy, ix + 1]) if 0 < ix < vw - 1 else (0.0, 1.0)
+        dy, gy = _subcell(m[iy - 1, ix], val, m[iy + 1, ix]) if 0 < iy < vh - 1 else (0.0, 1.0)
         kp[k, 0] = (ix + dx + 0.5) * stride_x / scale_xy[0]
         kp[k, 1] = (iy + dy + 0.5) * stride_y / scale_xy[1]
-        sc[k] = min(1.0, val)
+        sc[k] = min(1.0, val * gx * gy)
     return kp, sc
 
 

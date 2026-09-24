@@ -1,0 +1,30 @@
+# Optional 2D pose backends (see README, "2D pose backends"). MediaPipe (requirements.txt) and
+# OpenPose (OpenCV DNN, model files supplied by you) need nothing from this file.
+#
+#   python -m pip install -r requirements-extras.txt
+#
+# rtmlib and ultralytics depend on "opencv-python", which clashes with the
+# "opencv-contrib-python" that PoseBoard and MediaPipe use (two packages, one cv2 folder).
+# Afterwards restore a single OpenCV build:
+#
+#   python -m pip uninstall -y opencv-python opencv-python-headless
+#   python -m pip install --force-reinstall --no-deps opencv-contrib-python
+#
+# Or install only the extras you need (pip install -e ".[rtmlib]", ".[yolo]", ".[torchvision]",
+# ".[vitpose]", ".[all]"). NVIDIA GPU: see the README (onnxruntime-gpu, CUDA builds of PyTorch).
+-r requirements.txt
+
+# RTMPose / RTMW (DWPose) / RTMO / ViTPose (ONNX) / RTMPose3D, and MoveNet. No PyTorch.
+# Apache-2.0. Also bundled into the packaged PoseBoard.exe.
+rtmlib>=0.0.16
+onnxruntime>=1.16
+
+# YOLO11 / YOLOv8 / YOLO26 pose (YOLO26 needs 8.4). AGPL-3.0: check the license before
+# commercial use.
+ultralytics>=8.4
+
+# Keypoint R-CNN (torchvision, BSD-3-Clause) and ViTPose (transformers, Apache-2.0).
+# The PyPI wheels of torch are CPU-only on Windows; for CUDA see the README.
+torch>=2.1
+torchvision>=0.16
+transformers>=4.48

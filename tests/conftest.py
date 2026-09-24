@@ -22,7 +22,7 @@ def download_cached(url: str, name: str, timeout: float = 30.0) -> Path:
     path = cache_dir() / name
     if path.exists() and path.stat().st_size > 0:
         return path
-    tmp = path.with_suffix(path.suffix + ".part")
+    tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}.part")  # parallel test runs
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with urllib.request.urlopen(url, timeout=timeout) as r, open(tmp, "wb") as f:

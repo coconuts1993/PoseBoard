@@ -1007,6 +1007,39 @@ def test_stop_does_not_block_the_window_during_a_slow_frame(app, no_boards):
         w.close()
 
 
+def test_exe_selftest_accepts_keypoints_in_the_aspect_widened_rtmpose_crop(monkeypatch):
+    """Regression (Windows CI run 36020082305): on the black 320x240 test image RTMPose put
+    keypoints at y ~ 386, outside the box but inside the crop it actually saw (rtmlib pads the
+    box 1.25x and widens it to the model's 192:256 aspect ratio, so y spans -147 .. 387). Such
+    keypoints must pass; keypoints outside that crop must still fail."""
+    import importlib
+    from pathlib import Path
+
+    from poseboard.pose.detectors import rtmlib_det as rd
+
+    if not backend_available("rtmpose")[0]:
+        pytest.skip("rtmlib / onnxruntime not installed")
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "installer"))
+    entry = importlib.import_module("entry_gui")
+    lo, hi = entry._rtmpose_crop([0.0, 0.0, 320.0, 240.0], (192, 256))
+    np.testing.assert_allclose(lo, [-40.0, -146.6667], atol=1e-3)
+    np.testing.assert_allclose(hi, [360.0, 386.6667], atol=1e-3)
+    img = np.zeros((240, 320, 3), np.uint8)
+
+    def run(y_max):
+        def pose_model(image, bboxes=()):
+            kp = np.column_stack([np.linspace(80, 359, 17), np.linspace(-10, y_max, 17)])
+            return kp[None], np.full((1, 17), 0.8)
+
+        pose_model.model_input_size = (192, 256)
+        real = rd.RTMLibDetector("rtmpose", pose_model, lambda image: np.zeros((0, 4)))
+        return entry._selftest_real_rtmpose(real, img)
+
+    assert "OK (1 person with 17 keypoints" in run(385.625)  # the values seen on Windows CI
+    with pytest.raises(AssertionError, match="not mapped back"):
+        run(420.0)
+
+
 def test_exe_selftest_runs_the_real_pose_model_on_a_forced_box(monkeypatch):
     """``PoseBoard.exe --selftest`` with the real rtmlib models: besides YOLOX on a black image,
     RTMPose itself runs (on a forced whole-image box) and its output is mapped to a person.

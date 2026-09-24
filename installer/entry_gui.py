@@ -55,6 +55,20 @@ def _rtmlib_cached(mode: str = "lightweight") -> bool:
     return True
 
 
+def _rtmpose_crop(box, model_input_size):
+    """Image-pixel corners (lo, hi) of the crop RTMPose runs on for ``box`` (x1, y1, x2, y2):
+    rtmlib pads the box 1.25x (``bbox_xyxy2cs``) and then widens the shorter side to the model's
+    aspect ratio (``top_down_affine``), so a wide box gets a much taller crop."""
+    import numpy as np
+
+    x1, y1, x2, y2 = box
+    center = np.array([(x1 + x2) / 2, (y1 + y2) / 2])
+    bw, bh = (x2 - x1) * 1.25, (y2 - y1) * 1.25
+    aspect = model_input_size[0] / model_input_size[1]
+    size = np.array([bw, bw / aspect]) if bw > bh * aspect else np.array([bh * aspect, bh])
+    return center - size / 2, center + size / 2
+
+
 def _selftest_real_rtmpose(real, img) -> str:
     """Run both real rtmlib models: YOLOX on a black image (no person), then RTMPose (ONNX
     session and SimCC decoding) on a forced whole-image box, directly and through PoseBoard's
@@ -75,13 +89,15 @@ def _selftest_real_rtmpose(real, img) -> str:
     finally:
         real.det_model = det_model
     assert len(people) <= 1, people  # one box -> at most one person (none if all scores <= 0)
+    # rtmlib's RTMPose keeps its (width, height) input size; (192, 256) is RTMPose-s/m's
+    lo, hi = _rtmpose_crop(box, getattr(real.pose_model, "model_input_size", (192, 256)))
     for p in people:
         found = np.isfinite(p.keypoints).all(axis=1)
         assert p.keypoints.shape == (17, 2) and found.any(), p.keypoints
-        # mapped back to image pixels: within the (1.25x padded) crop of the box
-        lo, hi = -0.25 * np.array([w, h]), 1.25 * np.array([w, h])
-        inside = ((p.keypoints[found] >= lo) & (p.keypoints[found] <= hi)).all()
-        assert inside, f"RTMPose keypoints not mapped back to the image: {p.keypoints[found]}"
+        # mapped back to image pixels: within the crop RTMPose actually saw
+        inside = ((p.keypoints[found] >= lo - 1) & (p.keypoints[found] <= hi + 1)).all()
+        assert inside, (f"RTMPose keypoints not mapped back to the image: {p.keypoints[found]} "
+                        f"(crop {lo} .. {hi})")
     return (f"rtmlib real models (lightweight YOLOX + RTMPose): OK ({len(people)} person with "
             f"{int(np.isfinite(people[0].keypoints).all(axis=1).sum()) if people else 0} "
             "keypoints on the forced box)")

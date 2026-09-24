@@ -1,12 +1,12 @@
-"""Wii Balance Board HID 协议（纯函数，便于测试）。
+"""Wii Balance Board HID protocol (pure functions, easy to test).
 
-参考 wiibrew.org 的 Wiimote / Balance Board 文档以及 WiimoteLib 的实现：
-* 输出报告 0x12 设置数据上报模式，0x32 = 按键 + 8 字节扩展数据。
-* 输出报告 0x16 写寄存器，0x17 读寄存器；读回的数据通过输入报告 0x21 返回。
-* 扩展初始化：向 0xA400F0 写 0x55，再向 0xA400FB 写 0x00。
-* 校准数据位于 0xA40020 起的 32 字节：[4:12] 0kg，[12:20] 17kg，[20:28] 34kg，
-  每组 4 个传感器按 TR, BR, TL, BL 顺序，大端 16 位。
-* 0x32 报告中扩展数据的 8 字节同样按 TR, BR, TL, BL 顺序，大端 16 位。
+Based on the wiibrew.org Wiimote / Balance Board docs and the WiimoteLib implementation:
+* Output report 0x12 sets the data reporting mode; 0x32 = buttons + 8 bytes of extension data.
+* Output report 0x16 writes a register, 0x17 reads one; read data comes back in input report 0x21.
+* Extension init: write 0x55 to 0xA400F0, then 0x00 to 0xA400FB.
+* Calibration data is 32 bytes starting at 0xA40020: [4:12] 0 kg, [12:20] 17 kg, [20:28] 34 kg,
+  each group holding 4 sensors in TR, BR, TL, BL order, big-endian 16-bit.
+* The 8 extension bytes in a 0x32 report are also in TR, BR, TL, BL order, big-endian 16-bit.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ def status_request_report() -> bytes:
 
 def write_memory_report(address: int, data: bytes) -> bytes:
     if len(data) > 16:
-        raise ValueError("每次最多写 16 字节")
+        raise ValueError("At most 16 bytes can be written per report")
     payload = bytes(data) + bytes(16 - len(data))
     return pad([REPORT_WRITE_MEMORY, REGISTER_SPACE, (address >> 16) & 0xFF, (address >> 8) & 0xFF,
                 address & 0xFF, len(data)] + list(payload))
@@ -70,7 +70,7 @@ def read_memory_report(address: int, size: int) -> bytes:
 
 
 def parse_read_data(report: bytes | list[int]) -> tuple[int, bytes, int]:
-    """解析 0x21 报告，返回 (地址低 16 位, 数据, 错误码)。"""
+    """Parse a 0x21 report; return (low 16 bits of address, data, error code)."""
     r = bytes(report)
     se = r[3]
     size = (se >> 4) + 1
@@ -85,7 +85,7 @@ def be16(b: bytes, i: int) -> int:
 
 @dataclass
 class Calibration:
-    """每个传感器在 0 / 17 / 34 kg 时的原始读数，顺序 TR, BR, TL, BL。"""
+    """Raw reading of each sensor at 0 / 17 / 34 kg, in TR, BR, TL, BL order."""
 
     kg0: np.ndarray
     kg17: np.ndarray
@@ -93,14 +93,14 @@ class Calibration:
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "Calibration":
-        """data 为从 0xA40020 读取的 32 字节。"""
+        """``data`` is the 32 bytes read from 0xA40020."""
         if len(data) < 28:
-            raise ValueError("校准数据长度不足")
+            raise ValueError("Calibration data too short")
         vals = [be16(data, 4 + 2 * i) for i in range(12)]
         return cls(np.array(vals[0:4], float), np.array(vals[4:8], float), np.array(vals[8:12], float))
 
     def to_kg(self, raw: np.ndarray) -> np.ndarray:
-        """按 WiimoteLib 的分段线性插值把原始读数换算为 kg。"""
+        """Convert raw readings to kg using WiimoteLib's piecewise-linear interpolation."""
         raw = np.asarray(raw, float)
         low = 17.0 * (raw - self.kg0) / np.maximum(self.kg17 - self.kg0, 1e-9)
         high = 17.0 + 17.0 * (raw - self.kg17) / np.maximum(self.kg34 - self.kg17, 1e-9)
@@ -111,7 +111,7 @@ class Calibration:
 
 
 def parse_sensor_raw(report: bytes | list[int]) -> np.ndarray | None:
-    """从 0x32 报告中取出 4 个传感器原始值（TR, BR, TL, BL）。"""
+    """Extract the 4 raw sensor values (TR, BR, TL, BL) from a 0x32 report."""
     r = bytes(report)
     if not r or r[0] != INPUT_BUTTONS_EXT8 or len(r) < 11:
         return None
@@ -121,9 +121,11 @@ def parse_sensor_raw(report: bytes | list[int]) -> np.ndarray | None:
 
 def center_of_pressure(kg: np.ndarray, sensor_dx_m: float, sensor_dy_m: float,
                        min_total_kg: float = 1.0) -> tuple[float, float]:
-    """由四个传感器的力（顺序 TR, BR, TL, BL）计算板坐标系中的压力中心 (x, y)，米。
+    """Center of pressure (x, y) in board coordinates, in meters, from the four sensor
+    forces (order TR, BR, TL, BL).
 
-    x 向右（TR/BR 一侧）为正，y 向前（TL/TR 一侧）为正。总重量低于阈值时返回 NaN。
+    +x points right (TR/BR side), +y points forward (TL/TR side). Returns NaN when the
+    total weight is below the threshold.
     """
     tr, br, tl, bl = [float(v) for v in kg]
     total = tr + br + tl + bl

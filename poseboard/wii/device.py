@@ -1,7 +1,8 @@
-"""Wii Balance Board 设备读取（hidapi）与模拟器。
+"""Wii Balance Board device reader (hidapi) and simulator.
 
-两者都实现 ``ForceSource``：后台线程持续读取，每个样本带 ``time.perf_counter()`` 时间戳，
-与相机/姿态线程使用同一个时钟，从而可以在同一时间轴上对齐。
+Both implement ``ForceSource``: a background thread reads continuously and stamps each sample
+with ``time.perf_counter()``, the same clock used by the camera/pose threads, so everything
+can be aligned on a single timeline.
 """
 
 from __future__ import annotations
@@ -24,14 +25,14 @@ log = logging.getLogger(__name__)
 @dataclass
 class ForceSample:
     t: float  # time.perf_counter()
-    kg: np.ndarray  # (4,) TR, BR, TL, BL（已去皮）
+    kg: np.ndarray  # (4,) TR, BR, TL, BL (tared)
     total_kg: float
-    cop_board: tuple[float, float]  # 板坐标系 (x, y)，米；无人站立时为 NaN
+    cop_board: tuple[float, float]  # board frame (x, y), meters; NaN when nobody is standing
     raw: np.ndarray | None = None
 
 
 class ForceSource:
-    """带后台线程的力数据源基类。"""
+    """Base class for a force data source with a background thread."""
 
     name = "force"
 
@@ -74,7 +75,7 @@ class ForceSource:
             log.exception("force source stopped")
             self.error = str(e)
 
-    def _run(self) -> None:  # pragma: no cover - 由子类实现
+    def _run(self) -> None:  # pragma: no cover - implemented by subclasses
         raise NotImplementedError
 
     # ------------------------------------------------------------- listeners
@@ -112,10 +113,10 @@ class ForceSource:
             return [s for s in self.buffer if now - s.t <= seconds]
 
     def do_tare(self, seconds: float = 1.0) -> np.ndarray:
-        """把最近 ``seconds`` 秒（板上无人时）的平均读数作为零点。"""
+        """Use the mean reading over the last ``seconds`` seconds (board empty) as the zero point."""
         samples = self.recent(seconds)
         if not samples:
-            raise RuntimeError("没有可用于去皮的数据")
+            raise RuntimeError("No data available for taring")
         self.tare = self.tare + np.mean([s.kg for s in samples], axis=0)
         return self.tare
 
@@ -125,10 +126,11 @@ class ForceSource:
 
 
 class BalanceBoardHID(ForceSource):
-    """通过 hidapi 直接读取已蓝牙配对的 Wii Balance Board。
+    """Read a Bluetooth-paired Wii Balance Board directly via hidapi.
 
-    Windows：先在“蓝牙设备”中配对 “Nintendo RVL-WBC-01”（按电池仓里的红色 SYNC 键，PIN 留空），
-    设备出现在 HID 设备列表后即可连接。
+    Windows: first pair "Nintendo RVL-WBC-01" under "Bluetooth devices" (press the red SYNC
+    button in the battery compartment, leave the PIN empty). Once the device shows up in the
+    HID device list it can be connected.
     """
 
     name = "wii-balance-board"
@@ -156,7 +158,7 @@ class BalanceBoardHID(ForceSource):
         else:
             devs = self.list_devices()
             if not devs:
-                raise RuntimeError("未找到 Wii Balance Board（请先蓝牙配对）")
+                raise RuntimeError("Wii Balance Board not found (pair it via Bluetooth first)")
             dev.open_path(devs[0]["path"])
         dev.set_nonblocking(False)
         return dev
@@ -164,7 +166,7 @@ class BalanceBoardHID(ForceSource):
     def _write(self, report: bytes) -> None:
         n = self._dev.write(list(report))
         if n < 0:
-            raise RuntimeError("写 HID 报告失败")
+            raise RuntimeError("Failed to write HID report")
 
     def _read(self, timeout_ms: int = 100) -> bytes:
         data = self._dev.read(P.OUTPUT_REPORT_LEN, timeout_ms)
@@ -179,10 +181,10 @@ class BalanceBoardHID(ForceSource):
             if r and r[0] == P.INPUT_READ_DATA:
                 _, data, err = P.parse_read_data(r)
                 if err:
-                    raise RuntimeError(f"读寄存器错误 0x{err:x}")
+                    raise RuntimeError(f"Register read error 0x{err:x}")
                 out += data
         if len(out) < size:
-            raise RuntimeError("读取校准数据超时")
+            raise RuntimeError("Timed out reading calibration data")
         return bytes(out[:size])
 
     def _initialize(self) -> None:
@@ -211,7 +213,7 @@ class BalanceBoardHID(ForceSource):
                         self._emit_kg(t, self.calibration.to_kg(raw), raw)
                 elif r[0] == P.INPUT_STATUS:
                     self.battery = r[6]
-                    # 状态报告之后设备会退回默认上报模式，需要重新设置
+                    # After a status report the device falls back to the default reporting mode; set it again
                     self._write(P.set_mode_report())
                 if t - last_status > 10.0:
                     self._write(P.status_request_report())
@@ -232,7 +234,7 @@ class BalanceBoardHID(ForceSource):
 
 
 class SimulatedBoard(ForceSource):
-    """模拟一个 70kg 的人在板上缓慢晃动，用于没有设备时调试界面和流程。"""
+    """Simulate a 70 kg person slowly swaying on the board, for testing the UI and workflow without a device."""
 
     name = "wii-simulator"
 
@@ -242,13 +244,13 @@ class SimulatedBoard(ForceSource):
         self.rate_hz = rate_hz
 
     def kg_at(self, t: float) -> np.ndarray:
-        # COP 做李萨如轨迹，幅度 ±6cm（左右）/ ±4cm（前后）
+        # COP follows a Lissajous path, amplitude ±6 cm (left/right) / ±4 cm (front/back)
         x = 0.06 * math.sin(2 * math.pi * 0.23 * t)
         y = 0.04 * math.sin(2 * math.pi * 0.31 * t + 0.7)
         hx, hy = self.sensor_dx_m / 2, self.sensor_dy_m / 2
         m = self.mass_kg * (1 + 0.01 * math.sin(2 * math.pi * 1.1 * t))
-        # 双线性分配到四个角使 COP = (x, y)
-        u, v = (x / hx + 1) / 2, (y / hy + 1) / 2  # 0..1，右/前
+        # Distribute bilinearly to the four corners so that COP = (x, y)
+        u, v = (x / hx + 1) / 2, (y / hy + 1) / 2  # 0..1, right/front
         tr, br, tl, bl = u * v, u * (1 - v), (1 - u) * v, (1 - u) * (1 - v)
         return m * np.array([tr, br, tl, bl])
 

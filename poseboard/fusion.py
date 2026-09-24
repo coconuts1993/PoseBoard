@@ -1,4 +1,4 @@
-"""把 Wii 压力中心与 3D 姿态放到同一坐标系中。"""
+"""Bring the Wii center of pressure and the 3D pose into a common coordinate frame."""
 
 from __future__ import annotations
 
@@ -18,15 +18,15 @@ class FusedState:
     t: float
     total_kg: float
     force_n: float
-    cop_board: np.ndarray  # (2,) 板坐标
-    cop_world: np.ndarray  # (3,) 世界坐标
-    force_world: np.ndarray  # (3,) 地面反力向量（N，沿板法向）
+    cop_board: np.ndarray  # (2,) board coordinates
+    cop_world: np.ndarray  # (3,) world coordinates
+    force_world: np.ndarray  # (3,) ground reaction force vector (N, along the board normal)
     com_world: np.ndarray | None = None
-    com_board: np.ndarray | None = None  # (3,) 重心在板坐标系中的位置（z 为离板面高度）
+    com_board: np.ndarray | None = None  # (3,) COM in the board frame (z = height above the board surface)
 
     @property
     def com_minus_cop(self) -> np.ndarray | None:
-        """COM 在板面上的投影减 COP（板坐标，米）。"""
+        """COM projected onto the board plane minus COP (board coordinates, meters)."""
         if self.com_board is None:
             return None
         return self.com_board[:2] - self.cop_board

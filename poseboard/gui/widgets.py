@@ -1,4 +1,4 @@
-"""界面组件：可点选的视频视图、平衡板俯视 COP/COM 轨迹图。"""
+"""GUI widgets: clickable video view and top-down board view with COP/COM trails."""
 
 from __future__ import annotations
 
@@ -15,9 +15,9 @@ def bgr_to_qimage(img: np.ndarray) -> QImage:
 
 
 class VideoView(QWidget):
-    """显示 BGR 图像（保持宽高比），把鼠标点击换算为原图像素坐标。"""
+    """Shows a BGR image (aspect ratio preserved) and maps mouse clicks to source-image pixel coordinates."""
 
-    clicked = Signal(float, float, int)  # x, y（图像像素）, 鼠标键（1 左 / 2 右）
+    clicked = Signal(float, float, int)  # x, y (image pixels), mouse button (1 = left / 2 = right)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -28,7 +28,7 @@ class VideoView(QWidget):
         self.setMouseTracking(True)
         self.crosshair = False
         self._mouse: QPointF | None = None
-        self.placeholder = "未选择相机"
+        self.placeholder = "No camera selected"
 
     def set_image(self, img: np.ndarray | None) -> None:
         if img is None:
@@ -77,7 +77,7 @@ class VideoView(QWidget):
 
 
 class CopView(QWidget):
-    """平衡板俯视图：板轮廓、传感器、COP 轨迹（蓝）与 COM 投影轨迹（橙）。"""
+    """Top-down board view: outline, sensors, COP trail (blue) and projected COM trail (orange)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -105,7 +105,7 @@ class CopView(QWidget):
         s = min((self.width() - 2 * margin) / bw, (self.height() - 2 * margin - 16) / bh)
         cx, cy = self.width() / 2, (self.height() + 16) / 2
 
-        def pt(x, y):  # 板坐标（米，y 向前）-> 屏幕（前方朝上）
+        def pt(x, y):  # board coords (meters, y forward) -> screen (front facing up)
             return QPointF(cx + x * s, cy - y * s)
 
         p.setPen(QPen(QColor(90, 90, 90), 2))
@@ -120,7 +120,7 @@ class CopView(QWidget):
             p.setBrush(QColor(150, 150, 150))
             p.drawEllipse(pt(x, y), 5, 5)
             p.drawText(pt(x, y) + QPointF(-8, -9 if y > 0 else 20), name)
-        p.drawText(QPointF(8, 14), "前 (TL/TR 一侧) ↑")
+        p.drawText(QPointF(8, 14), "Front (TL/TR side) ↑")
 
         for trail, color in ((self.com_trail, QColor(255, 140, 0)), (self.cop_trail, QColor(30, 100, 220))):
             ok = trail[np.all(np.isfinite(trail), axis=1)]
@@ -136,4 +136,4 @@ class CopView(QWidget):
                 p.drawEllipse(pt(*ok[-1]), 6, 6)
         p.setPen(QColor(30, 30, 30))
         p.drawText(QPointF(8, self.height() - 8),
-                   f"{self.total_kg:6.1f} kg   {self.text}   ● COP(蓝)  ● COM 投影(橙)")
+                   f"{self.total_kg:6.1f} kg   {self.text}   ● COP (blue)  ● COM projection (orange)")

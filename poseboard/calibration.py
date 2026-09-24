@@ -1,12 +1,14 @@
-"""相机标定：棋盘格内参标定、棋盘格定义世界坐标系（外参）、读写标定文件。
+"""Camera calibration: checkerboard intrinsics, checkerboard-defined world frame
+(extrinsics), and reading/writing calibration files.
 
-约定
-----
-* 世界坐标单位为米。
-* 外参为 世界 -> 相机： X_cam = R @ X_world + t  (rvec 为 Rodrigues 向量)。
-* 棋盘格世界坐标系：原点在棋盘格的一个角上的内角点（外侧对角方格为黑色的那个），
-  X 沿棋盘格的“列数”方向，Y 沿“行数”方向，Z = X × Y 朝向相机一侧
-  （棋盘格平放在地面上时 Z 朝上）。见 ``canonical_corners``。
+Conventions
+-----------
+* World coordinates are in meters.
+* Extrinsics are world -> camera: X_cam = R @ X_world + t  (rvec is a Rodrigues vector).
+* Checkerboard world frame: the origin is the inner corner at one corner of the board
+  (the one whose diagonally outward square is black), X runs along the board's "cols"
+  direction, Y along its "rows" direction, and Z = X × Y points toward the camera
+  (Z is up when the board lies flat on the floor). See ``canonical_corners``.
 """
 
 from __future__ import annotations
@@ -45,7 +47,7 @@ class CameraCalibration:
 
     @property
     def center_world(self) -> np.ndarray:
-        """相机光心在世界坐标系中的位置。"""
+        """Camera optical center in world coordinates."""
         return -self.R.T @ self.t
 
     def projection_matrix(self, normalized: bool = False) -> np.ndarray:
@@ -58,7 +60,7 @@ class CameraCalibration:
         return pts_w @ self.R.T + self.t
 
     def project(self, pts_w: np.ndarray) -> np.ndarray:
-        """把世界坐标点投影到图像像素坐标 (N,2)。"""
+        """Project world points to image pixel coordinates (N,2)."""
         pts_w = np.asarray(pts_w, dtype=np.float64).reshape(-1, 3)
         if len(pts_w) == 0:
             return np.zeros((0, 2))
@@ -99,7 +101,8 @@ class CameraCalibration:
 
 def approximate_calibration(name: str, width: int, height: int,
                             hfov_deg: float = 60.0) -> CameraCalibration:
-    """未标定时的近似内参（针孔、无畸变），只用于快速试用，精度有限。"""
+    """Approximate intrinsics for an uncalibrated camera (pinhole, no distortion).
+    For quick trials only; accuracy is limited."""
     f = (width / 2) / np.tan(np.deg2rad(hfov_deg) / 2)
     K = np.array([[f, 0, width / 2], [0, f, height / 2], [0, 0, 1]], np.float64)
     return CameraCalibration(name, (width, height), K, np.zeros(5))
@@ -108,8 +111,8 @@ def approximate_calibration(name: str, width: int, height: int,
 # ---------------------------------------------------------------- checkerboard
 @dataclass
 class CheckerboardSpec:
-    cols: int = 9  # 内角点数（横向）
-    rows: int = 6  # 内角点数（纵向）
+    cols: int = 9  # number of inner corners (horizontal)
+    rows: int = 6  # number of inner corners (vertical)
     square_mm: float = 25.0
 
     @property
@@ -117,7 +120,7 @@ class CheckerboardSpec:
         return (self.cols, self.rows)
 
     def object_points(self) -> np.ndarray:
-        """棋盘格内角点在棋盘格坐标系中的 3D 坐标（米）。"""
+        """3D coordinates (meters) of the inner corners in the checkerboard frame."""
         grid = np.zeros((self.rows * self.cols, 3), np.float64)
         grid[:, :2] = np.mgrid[0:self.cols, 0:self.rows].T.reshape(-1, 2)
         return grid * (self.square_mm / 1000.0)
@@ -125,7 +128,8 @@ class CheckerboardSpec:
 
 def find_checkerboard(image: np.ndarray, spec: CheckerboardSpec,
                       fast: bool = False) -> np.ndarray | None:
-    """检测棋盘格内角点 (N,2)。fast=True 用于实时预览（未检测到时快速返回）。"""
+    """Detect checkerboard inner corners (N,2). fast=True is for live preview
+    (returns quickly when no board is found)."""
     gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     flags = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE
     if fast:
@@ -140,7 +144,7 @@ def find_checkerboard(image: np.ndarray, spec: CheckerboardSpec,
 
 @dataclass
 class IntrinsicCollector:
-    """累积多张棋盘格图像的角点，用于内参标定。"""
+    """Accumulates checkerboard corners from multiple images for intrinsic calibration."""
 
     spec: CheckerboardSpec
     image_size: tuple[int, int] | None = None
@@ -158,7 +162,7 @@ class IntrinsicCollector:
 
     def calibrate(self, name: str) -> CameraCalibration:
         if len(self.corners) < 3:
-            raise ValueError("至少需要 3 张（建议 15 张以上）检测到棋盘格的图像")
+            raise ValueError("Need at least 3 images with a detected checkerboard (15+ recommended)")
         obj = self.spec.object_points().astype(np.float32)
         objpoints = [obj] * len(self.corners)
         imgpoints = [c.astype(np.float32).reshape(-1, 1, 2) for c in self.corners]
@@ -169,12 +173,15 @@ class IntrinsicCollector:
 
 def canonical_corners(image: np.ndarray, corners: np.ndarray, spec: CheckerboardSpec,
                       cam: "CameraCalibration") -> np.ndarray:
-    """统一棋盘格角点顺序，使不同相机得到同一个世界坐标系。
+    """Normalize the checkerboard corner order so all cameras share the same world frame.
 
-    OpenCV 返回的角点起点可能是四个角中的任意一个。这里在 4 种排列中选出：
-    (1) 相机位于棋盘格 +Z 一侧（Z 朝向相机，棋盘格平放地面时即 Z 朝上）；
-    (2) 原点外侧对角的那个方格是黑色。
-    需要“内角点列数 + 行数”为奇数（如 9x6）的棋盘格，否则 180° 对称无法区分。
+    OpenCV may start the corner list at any of the four corners. Of the 4 possible
+    orderings, this picks the one where:
+    (1) the camera is on the +Z side of the board (Z points toward the camera, i.e.
+        Z is up when the board lies flat on the floor);
+    (2) the square diagonally outward from the origin is black.
+    Requires a board whose inner-corner "cols + rows" is odd (e.g. 9x6); otherwise
+    the 180° symmetry cannot be resolved.
     """
     gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     gray = gray.astype(np.float32)
@@ -189,7 +196,7 @@ def canonical_corners(image: np.ndarray, corners: np.ndarray, spec: Checkerboard
         if not ok:
             continue
         R = cv2.Rodrigues(rvec)[0]
-        if (-R.T @ tvec.ravel())[2] <= 0:  # 相机在 -Z 一侧（镜像排列）
+        if (-R.T @ tvec.ravel())[2] <= 0:  # camera on the -Z side (mirrored ordering)
             continue
         img_pts, _ = cv2.projectPoints(probes, rvec, tvec, cam.K, cam.dist)
         vals = []
@@ -198,7 +205,7 @@ def canonical_corners(image: np.ndarray, corners: np.ndarray, spec: Checkerboard
                 vals.append(np.nan)
                 continue
             vals.append(float(cv2.getRectSubPix(gray, (5, 5), (float(q[0]), float(q[1]))).mean()))
-        score = vals[1] - vals[0]  # 原点外侧方格越黑、相邻方格越白越好
+        score = vals[1] - vals[0]  # darker outer square at origin and whiter neighbor is better
         if not np.isfinite(score):
             score = -1e6
         if score > best_score:
@@ -208,14 +215,17 @@ def canonical_corners(image: np.ndarray, corners: np.ndarray, spec: Checkerboard
 
 def extrinsics_from_checkerboard(cam: CameraCalibration, image: np.ndarray,
                                  spec: CheckerboardSpec) -> float:
-    """检测棋盘格并把它作为世界坐标系，写入 cam.rvec/cam.tvec。返回重投影误差（像素）。
+    """Detect the checkerboard and use it as the world frame; writes cam.rvec/cam.tvec.
+    Returns the reprojection error (pixels).
 
-    角点顺序经过 ``canonical_corners`` 统一：Z 轴朝向相机一侧（平放地面时朝上），
-    原点位于外侧对角方格为黑色的那个内角点。多台相机应同时看到同一次摆放的棋盘格。
+    Corner order is normalized by ``canonical_corners``: Z points toward the camera
+    (up when the board lies flat on the floor), and the origin is the inner corner whose
+    diagonally outward square is black. Multiple cameras should all see the board in the
+    same placement.
     """
     corners = find_checkerboard(image, spec)
     if corners is None:
-        raise RuntimeError("未检测到棋盘格")
+        raise RuntimeError("Checkerboard not detected")
     corners = canonical_corners(image, corners, spec, cam)
     return extrinsics_from_points(cam, spec.object_points(), corners)
 
@@ -225,7 +235,7 @@ def extrinsics_from_points(cam: CameraCalibration, obj_w: np.ndarray, img_px: np
     img_px = np.asarray(img_px, np.float64).reshape(-1, 2)
     ok, rvec, tvec = cv2.solvePnP(obj_w, img_px, cam.K, cam.dist, flags=cv2.SOLVEPNP_ITERATIVE)
     if not ok:
-        raise RuntimeError("solvePnP 失败")
+        raise RuntimeError("solvePnP failed")
     cam.rvec, cam.tvec = rvec.ravel(), tvec.ravel()
     err = np.linalg.norm(cam.project(obj_w) - img_px, axis=1).mean()
     cam.extrinsic_rms = float(err)
@@ -247,9 +257,10 @@ def load_calibrations(path: str | Path) -> list[CameraCalibration]:
 
 
 def load_pose2sim_toml(path: str | Path) -> list[CameraCalibration]:
-    """读取 Pose2Sim 格式的 Calib.toml（matrix / distortions / rotation / translation）。
+    """Read a Pose2Sim-format Calib.toml (matrix / distortions / rotation / translation).
 
-    注意：Pose2Sim 的平移单位是米，旋转为 Rodrigues 向量（世界 -> 相机），与本项目一致。
+    Note: Pose2Sim translations are in meters and rotations are Rodrigues vectors
+    (world -> camera), consistent with this project.
     """
     try:
         import tomllib  # py>=3.11

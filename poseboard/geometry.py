@@ -1,21 +1,23 @@
-"""Wii Balance Board 的几何模型、在相机中的定位（点选四角+中心）以及三角化工具。
+"""Wii Balance Board geometry model, locating it in the camera (clicking the 4 corners +
+center), and triangulation utilities.
 
-Balance Board 坐标系（单位：米）
---------------------------------
-俯视平衡板，站在板上面朝 "前方"（TL/TR 一侧）：
+Balance Board frame (units: meters)
+-----------------------------------
+Top view of the board, standing on it facing "forward" (toward the TL/TR side):
 
-        TL ─────────── TR          +Y (前, "top")
+        TL ─────────── TR          +Y (front, "top")
         │               │           ↑
-        │       C       │           └──→ +X (右)
+        │       C       │           └──→ +X (right)
         │               │
         BL ─────────── BR
 
-* 原点 C 在板上表面中心，Z 轴朝上。
-* TL/TR/BR/BL 同时指四个传感器（Wii 数据里的顺序）和与之最近的板面外角。
-* 标注顺序固定为：TL, TR, BR, BL, C。
+* Origin C is at the center of the top surface; Z points up.
+* TL/TR/BR/BL name both the four sensors (as ordered in the Wii data) and the nearest
+  outer corners of the board surface.
+* The click order is fixed: TL, TR, BR, BL, C.
 
-默认尺寸（官方 Wii Balance Board）：板面外形约 511 x 316 mm，
-传感器中心间距 433 mm（左右） x 238 mm（前后）。
+Default dimensions (official Wii Balance Board): outer surface about 511 x 316 mm,
+sensor center spacing 433 mm (left-right) x 238 mm (front-back).
 """
 
 from __future__ import annotations
@@ -28,24 +30,24 @@ import numpy as np
 from poseboard.calibration import CameraCalibration
 
 LANDMARK_NAMES = ("TL", "TR", "BR", "BL", "C")
-SENSOR_NAMES = ("TR", "BR", "TL", "BL")  # 与 Wii 数据顺序一致
+SENSOR_NAMES = ("TR", "BR", "TL", "BL")  # matches the Wii data order
 
 
 @dataclass
 class BoardGeometry:
-    length_mm: float = 511.0  # 板面外形 X 方向（左右）
-    width_mm: float = 316.0  # 板面外形 Y 方向（前后）
-    sensor_dx_mm: float = 433.0  # 左右传感器中心间距
-    sensor_dy_mm: float = 238.0  # 前后传感器中心间距
+    length_mm: float = 511.0  # outer surface size along X (left-right)
+    width_mm: float = 316.0  # outer surface size along Y (front-back)
+    sensor_dx_mm: float = 433.0  # left-right sensor center spacing
+    sensor_dy_mm: float = 238.0  # front-back sensor center spacing
 
     def landmarks(self) -> np.ndarray:
-        """标注点 TL, TR, BR, BL, C 在板坐标系中的坐标 (5,3)，米。"""
+        """Landmarks TL, TR, BR, BL, C in the board frame (5,3), meters."""
         hx, hy = self.length_mm / 2000.0, self.width_mm / 2000.0
         return np.array([[-hx, hy, 0], [hx, hy, 0], [hx, -hy, 0], [-hx, -hy, 0], [0, 0, 0]],
                         dtype=np.float64)
 
     def sensors(self) -> np.ndarray:
-        """四个传感器位置 (TR, BR, TL, BL) (4,3)，米。"""
+        """Positions of the four sensors (TR, BR, TL, BL) (4,3), meters."""
         hx, hy = self.sensor_dx_mm / 2000.0, self.sensor_dy_mm / 2000.0
         return np.array([[hx, hy, 0], [hx, -hy, 0], [-hx, hy, 0], [-hx, -hy, 0]], dtype=np.float64)
 
@@ -87,7 +89,7 @@ class BoardPose:
 
     @property
     def up_world(self) -> np.ndarray:
-        """板面法向（板坐标 +Z）在世界坐标中的方向。"""
+        """Board surface normal (board +Z) expressed in world coordinates."""
         return self.board_to_world.R[:, 2]
 
     def to_dict(self) -> dict:
@@ -101,7 +103,8 @@ class BoardPose:
 
 
 def rotate_board_frame(pose: BoardPose, degrees: int) -> BoardPose:
-    """绕板法向旋转板坐标系（标注方向搞反时用，例如 180°）。"""
+    """Rotate the board frame about the board normal (use when the clicks were oriented
+    wrongly, e.g. 180°)."""
     a = np.deg2rad(degrees)
     Rz = np.array([[np.cos(a), -np.sin(a), 0], [np.sin(a), np.cos(a), 0], [0, 0, 1]])
     T = pose.board_to_world
@@ -110,7 +113,7 @@ def rotate_board_frame(pose: BoardPose, degrees: int) -> BoardPose:
 
 # ------------------------------------------------------------------ utilities
 def kabsch(src: np.ndarray, dst: np.ndarray) -> RigidTransform:
-    """求刚体变换使 dst ≈ R @ src + t（最小二乘）。"""
+    """Find the rigid transform such that dst ≈ R @ src + t (least squares)."""
     src, dst = np.asarray(src, np.float64), np.asarray(dst, np.float64)
     cs, cd = src.mean(0), dst.mean(0)
     H = (src - cs).T @ (dst - cd)
@@ -123,9 +126,10 @@ def kabsch(src: np.ndarray, dst: np.ndarray) -> RigidTransform:
 
 def triangulate_point(cams: list[CameraCalibration], pts_px: list[np.ndarray],
                       weights: list[float] | None = None) -> np.ndarray:
-    """多视角 DLT 三角化单个点。pts_px 为每台相机中的像素坐标。"""
+    """Multi-view DLT triangulation of a single point. pts_px holds the pixel coordinates
+    in each camera."""
     if len(cams) < 2:
-        raise ValueError("三角化至少需要 2 台相机")
+        raise ValueError("Triangulation requires at least 2 cameras")
     weights = weights or [1.0] * len(cams)
     rows = []
     for cam, p, w in zip(cams, pts_px, weights):
@@ -146,17 +150,20 @@ def reprojection_error(cam: CameraCalibration, pts_w: np.ndarray, pts_px: np.nda
 # ---------------------------------------------------------- board registration
 def register_board(geometry: BoardGeometry, cams: list[CameraCalibration],
                    clicks: list[np.ndarray | None]) -> BoardPose:
-    """根据在各相机图像中点选的 5 个标注点（TL, TR, BR, BL, C）求平衡板在世界坐标系中的位姿。
+    """Compute the board pose in the world frame from the 5 landmarks (TL, TR, BR, BL, C)
+    clicked in each camera image.
 
-    * 若有 ≥2 台已标定外参的相机都完成了标注：先三角化 5 个点，再用 Kabsch 与板模型对齐。
-    * 否则：用唯一一台相机的点做 PnP（平面 IPPE + 迭代细化），再经相机外参变换到世界坐标系。
-      若该相机没有外参，则世界坐标系即为该相机坐标系。
+    * If ≥2 cameras with extrinsics have all 5 clicks: triangulate the 5 points, then align
+      them to the board model with Kabsch.
+    * Otherwise: solve PnP from a single camera's clicks (planar IPPE + iterative refinement),
+      then transform to the world frame using the camera extrinsics.
+      If that camera has no extrinsics, the world frame is that camera's frame.
     """
     model = geometry.landmarks()
     usable = [(c, np.asarray(k, np.float64).reshape(5, 2)) for c, k in zip(cams, clicks)
               if k is not None and len(k) == 5]
     if not usable:
-        raise ValueError("没有完成 5 点标注的相机")
+        raise ValueError("No camera has all 5 landmarks clicked")
 
     with_ext = [(c, k) for c, k in usable if c.has_extrinsics]
     if len(with_ext) >= 2:
@@ -180,20 +187,20 @@ def register_board(geometry: BoardGeometry, cams: list[CameraCalibration],
             pts_w = T.apply(model)
             if c.has_extrinsics:
                 errors[c.name] = reprojection_error(c, pts_w, k)
-            else:  # 世界坐标系 = 该相机坐标系
+            else:  # world frame = this camera frame
                 img, _ = cv2.projectPoints(pts_w, np.zeros(3), np.zeros(3), c.K, c.dist)
                 errors[c.name] = float(np.linalg.norm(img.reshape(-1, 2) - k, axis=1).mean())
     return BoardPose(T, method, errors)
 
 
 def solve_board_pnp(cam: CameraCalibration, model: np.ndarray, img_px: np.ndarray) -> RigidTransform:
-    """板坐标 -> 相机坐标。"""
+    """Board frame -> camera frame."""
     obj = np.asarray(model, np.float64).reshape(-1, 1, 3)
     img = np.asarray(img_px, np.float64).reshape(-1, 1, 2)
     ok, rvec, tvec = cv2.solvePnP(obj, img, cam.K, cam.dist, flags=cv2.SOLVEPNP_IPPE)
     if not ok:
         ok, rvec, tvec = cv2.solvePnP(obj, img, cam.K, cam.dist, flags=cv2.SOLVEPNP_ITERATIVE)
     if not ok:
-        raise RuntimeError("平衡板 PnP 求解失败，请检查点选顺序")
+        raise RuntimeError("Balance board PnP failed; check the click order")
     rvec, tvec = cv2.solvePnPRefineLM(obj, img, cam.K, cam.dist, rvec, tvec)
     return RigidTransform(cv2.Rodrigues(rvec)[0], tvec.ravel())

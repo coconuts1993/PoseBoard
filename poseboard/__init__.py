@@ -1,3 +1,3 @@
-"""PoseBoard: 同步采集 3D 人体姿态与 Wii Balance Board 力/压力中心数据。"""
+"""PoseBoard: synchronized recording of 3D human pose and Wii Balance Board force/COP data."""
 
 __version__ = "0.1.0"

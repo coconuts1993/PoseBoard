@@ -1,4 +1,4 @@
-"""在相机画面上绘制：点选的标注点、平衡板轮廓/传感器/坐标轴、COP 与力、骨架、COM。"""
+"""Drawing on camera frames: clicked landmarks, board outline/sensors/axes, COP and force, skeleton, COM."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ CLICK_COLORS = [(0, 0, 255), (0, 200, 255), (0, 255, 0), (255, 128, 0), (255, 0,
 
 
 def project_world(cam: CameraCalibration, pts_w: np.ndarray) -> np.ndarray:
-    """投影世界坐标点；相机没有外参时世界坐标系即相机坐标系。"""
+    """Project world points; if the camera has no extrinsics, the world frame is the camera frame."""
     pts_w = np.asarray(pts_w, np.float64).reshape(-1, 3)
     out = np.full((len(pts_w), 2), np.nan)
     ok = np.all(np.isfinite(pts_w), axis=1)
@@ -21,7 +21,7 @@ def project_world(cam: CameraCalibration, pts_w: np.ndarray) -> np.ndarray:
         return out
     rvec = cam.rvec if cam.has_extrinsics else np.zeros(3)
     tvec = cam.tvec if cam.has_extrinsics else np.zeros(3)
-    # 相机背后的点不投影
+    # Points behind the camera are not projected
     pc = pts_w[ok] @ cv2.Rodrigues(np.asarray(rvec, float))[0].T + np.asarray(tvec, float).ravel()
     img, _ = cv2.projectPoints(pts_w[ok], np.asarray(rvec, float), np.asarray(tvec, float), cam.K, cam.dist)
     img = img.reshape(-1, 2)
@@ -109,7 +109,7 @@ def draw_pose(img: np.ndarray, cam: CameraCalibration, cam_name: str, pose: Pose
     if com_world is not None:
         pts = [com_world]
         if board is not None:
-            # 沿板法向投影到板面
+            # Project onto the board surface along the board normal
             n = board.up_world
             d = np.dot(com_world - board.board_to_world.t, n)
             pts.append(com_world - d * n)

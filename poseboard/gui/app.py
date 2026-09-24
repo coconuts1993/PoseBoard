@@ -1,6 +1,7 @@
-"""PoseBoard 主界面。
+"""PoseBoard main window.
 
-流程：设备 → 相机标定（棋盘格）→ Wii 定位（在画面中点选四角 + 中心）→ 采集。
+Workflow: Devices → Camera calibration (checkerboard) → Board setup (click the 4 corners
++ center in the image) → Record.
 """
 
 from __future__ import annotations
@@ -39,16 +40,17 @@ from poseboard.gui.widgets import CopView, VideoView
 log = logging.getLogger(__name__)
 
 CLICK_HINTS = {
-    "TL": "左前角 TL（靠近 TL 传感器的板角）",
-    "TR": "右前角 TR",
-    "BR": "右后角 BR",
-    "BL": "左后角 BL",
-    "C": "板面中心 C",
+    "TL": "front-left corner TL (the board corner nearest the TL sensor)",
+    "TR": "front-right corner TR",
+    "BR": "back-right corner BR",
+    "BL": "back-left corner BL",
+    "C": "board center C",
 }
 
 
 class PoseWorker:
-    """后台线程：取各相机最新帧 → 姿态估计 → 保存最新结果并写入录制。"""
+    """Background thread: latest frame of each camera → pose estimation → keep the latest result
+    and write it to the recording."""
 
     def __init__(self, estimator: PoseEstimator, get_frames, get_cams, recorder: SessionRecorder):
         self.estimator = estimator
@@ -98,7 +100,7 @@ class PoseWorker:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PoseBoard — 3D 姿态 + Wii Balance Board 同步采集")
+        self.setWindowTitle("PoseBoard — Synchronized 3D Pose + Wii Balance Board Recording")
         self.resize(1500, 900)
 
         self.streams: dict[str, CameraStream] = {}
@@ -112,7 +114,7 @@ class MainWindow(QMainWindow):
         self.recorder = SessionRecorder(Path.cwd() / "recordings")
         self.click_mode = False
         self._rec_started = 0.0
-        self._com_trail: deque = deque(maxlen=300)  # (t, x, y) 板坐标
+        self._com_trail: deque = deque(maxlen=300)  # (t, x, y) in board coordinates
 
         self._build_ui()
         self.timer = QTimer(self)
@@ -126,13 +128,13 @@ class MainWindow(QMainWindow):
         left = QWidget()
         lv = QVBoxLayout(left)
         top = QHBoxLayout()
-        top.addWidget(QLabel("显示相机:"))
+        top.addWidget(QLabel("Show camera:"))
         self.cam_select = QComboBox()
         self.cam_select.currentTextChanged.connect(lambda _: self._update_click_hint())
         top.addWidget(self.cam_select, 1)
-        self.chk_overlay = QCheckBox("叠加平衡板/COP")
+        self.chk_overlay = QCheckBox("Overlay board/COP")
         self.chk_overlay.setChecked(True)
-        self.chk_skeleton = QCheckBox("叠加骨架/COM")
+        self.chk_skeleton = QCheckBox("Overlay skeleton/COM")
         self.chk_skeleton.setChecked(True)
         top.addWidget(self.chk_overlay)
         top.addWidget(self.chk_skeleton)
@@ -146,10 +148,10 @@ class MainWindow(QMainWindow):
         splitter.addWidget(left)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._tab_devices(), "1 设备")
-        self.tabs.addTab(self._tab_calibration(), "2 相机标定")
-        self.tabs.addTab(self._tab_board(), "3 Wii 定位")
-        self.tabs.addTab(self._tab_record(), "4 采集")
+        self.tabs.addTab(self._tab_devices(), "1 Devices")
+        self.tabs.addTab(self._tab_calibration(), "2 Camera Calibration")
+        self.tabs.addTab(self._tab_board(), "3 Board Setup")
+        self.tabs.addTab(self._tab_record(), "4 Record")
         self.tabs.setMinimumWidth(420)
         splitter.addWidget(self.tabs)
         splitter.setStretchFactor(0, 3)
@@ -158,15 +160,15 @@ class MainWindow(QMainWindow):
         self.status = self.statusBar()
 
     def _build_menu(self):
-        m = self.menuBar().addMenu("文件")
-        for text, fn in (("保存配置…", self.save_project), ("加载配置…", self.load_project)):
+        m = self.menuBar().addMenu("File")
+        for text, fn in (("Save Project…", self.save_project), ("Load Project…", self.load_project)):
             a = QAction(text, self)
             a.triggered.connect(fn)
             m.addAction(a)
         m.addSeparator()
-        for text, fn in (("导入相机标定 (.json / Pose2Sim .toml)…", self.load_calib),
-                         ("导出相机标定 (.json)…", self.save_calib),
-                         ("导出 Pose2Sim Calib.toml…", self.export_toml)):
+        for text, fn in (("Import Camera Calibration (.json / Pose2Sim .toml)…", self.load_calib),
+                         ("Export Camera Calibration (.json)…", self.save_calib),
+                         ("Export Pose2Sim Calib.toml…", self.export_toml)):
             a = QAction(text, self)
             a.triggered.connect(fn)
             m.addAction(a)
@@ -175,24 +177,24 @@ class MainWindow(QMainWindow):
         w = QWidget()
         v = QVBoxLayout(w)
 
-        g = QGroupBox("相机")
+        g = QGroupBox("Cameras")
         f = QGridLayout(g)
         self.cam_source = QLineEdit("0")
-        self.cam_source.setToolTip("设备序号 (0,1,…)、视频文件路径或 rtsp/http 地址")
+        self.cam_source.setToolTip("Device index (0, 1, …), video file path, or rtsp/http URL")
         self.cam_res = QComboBox()
-        self.cam_res.addItems(["默认", "640x480", "1280x720", "1920x1080"])
+        self.cam_res.addItems(["Default", "640x480", "1280x720", "1920x1080"])
         self.cam_res.setCurrentText("1280x720")
-        b_add = QPushButton("添加相机")
+        b_add = QPushButton("Add Camera")
         b_add.clicked.connect(self.add_camera)
-        b_file = QPushButton("视频文件…")
+        b_file = QPushButton("Video File…")
         b_file.clicked.connect(self._pick_video)
         self.cam_list = QListWidget()
-        b_rm = QPushButton("移除所选")
+        b_rm = QPushButton("Remove Selected")
         b_rm.clicked.connect(self.remove_camera)
-        f.addWidget(QLabel("来源"), 0, 0)
+        f.addWidget(QLabel("Source"), 0, 0)
         f.addWidget(self.cam_source, 0, 1)
         f.addWidget(b_file, 0, 2)
-        f.addWidget(QLabel("分辨率"), 1, 0)
+        f.addWidget(QLabel("Resolution"), 1, 0)
         f.addWidget(self.cam_res, 1, 1)
         f.addWidget(b_add, 1, 2)
         f.addWidget(self.cam_list, 2, 0, 1, 3)
@@ -202,22 +204,22 @@ class MainWindow(QMainWindow):
         g = QGroupBox("Wii Balance Board")
         f = QGridLayout(g)
         self.wii_devices = QComboBox()
-        b_scan = QPushButton("扫描")
+        b_scan = QPushButton("Scan")
         b_scan.clicked.connect(self.scan_wii)
-        b_conn = QPushButton("连接")
+        b_conn = QPushButton("Connect")
         b_conn.clicked.connect(self.connect_wii)
-        b_sim = QPushButton("使用模拟器")
+        b_sim = QPushButton("Use Simulator")
         b_sim.clicked.connect(self.connect_sim)
-        b_disc = QPushButton("断开")
+        b_disc = QPushButton("Disconnect")
         b_disc.clicked.connect(self.disconnect_wii)
-        b_tare = QPushButton("去皮（板上无人时）")
+        b_tare = QPushButton("Tare (board empty)")
         b_tare.clicked.connect(self.tare)
         self.min_kg = QDoubleSpinBox()
         self.min_kg.setRange(0, 50)
         self.min_kg.setValue(5.0)
         self.min_kg.setSuffix(" kg")
         self.min_kg.valueChanged.connect(lambda v: setattr(self.force, "min_total_kg", v) if self.force else None)
-        self.wii_label = QLabel("未连接")
+        self.wii_label = QLabel("Not connected")
         self.wii_label.setStyleSheet("font-family: monospace")
         f.addWidget(self.wii_devices, 0, 0, 1, 2)
         f.addWidget(b_scan, 0, 2)
@@ -225,7 +227,7 @@ class MainWindow(QMainWindow):
         f.addWidget(b_sim, 1, 1)
         f.addWidget(b_disc, 1, 2)
         f.addWidget(b_tare, 2, 0, 1, 2)
-        f.addWidget(QLabel("COP 最小总重"), 3, 0)
+        f.addWidget(QLabel("COP min. load"), 3, 0)
         f.addWidget(self.min_kg, 3, 1)
         f.addWidget(self.wii_label, 4, 0, 1, 3)
         v.addWidget(g)
@@ -235,7 +237,7 @@ class MainWindow(QMainWindow):
     def _tab_calibration(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
-        g = QGroupBox("棋盘格")
+        g = QGroupBox("Checkerboard")
         f = QFormLayout(g)
         self.cb_cols = QSpinBox()
         self.cb_cols.setRange(3, 30)
@@ -247,34 +249,36 @@ class MainWindow(QMainWindow):
         self.cb_square.setRange(1, 500)
         self.cb_square.setValue(25.0)
         self.cb_square.setSuffix(" mm")
-        self.chk_detect = QCheckBox("实时显示棋盘格检测")
-        f.addRow("内角点（列）", self.cb_cols)
-        f.addRow("内角点（行）", self.cb_rows)
-        f.addRow("方格边长", self.cb_square)
+        self.chk_detect = QCheckBox("Show live checkerboard detection")
+        f.addRow("Inner corners (cols)", self.cb_cols)
+        f.addRow("Inner corners (rows)", self.cb_rows)
+        f.addRow("Square size", self.cb_square)
         f.addRow(self.chk_detect)
         v.addWidget(g)
 
-        g = QGroupBox("内参（对当前显示的相机）")
+        g = QGroupBox("Intrinsics (displayed camera)")
         f = QVBoxLayout(g)
-        f.addWidget(QLabel("把棋盘格放在画面不同位置/角度，逐张采集 15~30 张后计算。"))
+        f.addWidget(QLabel("Capture 15-30 frames with the checkerboard at different\n"
+                           "positions/angles in the image, then compute."))
         h = QHBoxLayout()
-        b = QPushButton("采集当前帧")
+        b = QPushButton("Capture Frame")
         b.clicked.connect(self.capture_intrinsic)
         h.addWidget(b)
-        b = QPushButton("清空")
+        b = QPushButton("Clear")
         b.clicked.connect(lambda: self.collectors.pop(self.current_cam(), None))
         h.addWidget(b)
-        b = QPushButton("计算内参")
+        b = QPushButton("Compute Intrinsics")
         b.clicked.connect(self.compute_intrinsic)
         h.addWidget(b)
         f.addLayout(h)
         v.addWidget(g)
 
-        g = QGroupBox("外参 / 世界坐标系")
+        g = QGroupBox("Extrinsics / World Frame")
         f = QVBoxLayout(g)
-        f.addWidget(QLabel("把棋盘格平放在地面（最好靠近平衡板），所有相机都能看到，\n"
-                           "点击下方按钮：棋盘格即成为世界坐标系（Z 朝上，单位米）。"))
-        b = QPushButton("用棋盘格设置所有相机外参")
+        f.addWidget(QLabel("Lay the checkerboard flat on the floor (ideally near\n"
+                           "the board) where all cameras can see it, then click\n"
+                           "below: it becomes the world frame (Z up, meters)."))
+        b = QPushButton("Set All Camera Extrinsics from Checkerboard")
         b.clicked.connect(self.compute_extrinsics_all)
         f.addWidget(b)
         v.addWidget(g)
@@ -286,11 +290,11 @@ class MainWindow(QMainWindow):
     def _tab_board(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
-        g = QGroupBox("平衡板尺寸")
+        g = QGroupBox("Board Dimensions")
         f = QFormLayout(g)
         self.geo_spins = {}
-        for key, label in (("length_mm", "板面长（左右）"), ("width_mm", "板面宽（前后）"),
-                           ("sensor_dx_mm", "传感器间距 左右"), ("sensor_dy_mm", "传感器间距 前后")):
+        for key, label in (("length_mm", "Length (left-right)"), ("width_mm", "Width (front-back)"),
+                           ("sensor_dx_mm", "Sensor spacing L-R"), ("sensor_dy_mm", "Sensor spacing F-B")):
             s = QDoubleSpinBox()
             s.setRange(10, 2000)
             s.setSuffix(" mm")
@@ -300,59 +304,63 @@ class MainWindow(QMainWindow):
             f.addRow(label, s)
         v.addWidget(g)
 
-        g = QGroupBox("在画面中点选平衡板")
+        g = QGroupBox("Click the Board in the Image")
         f = QVBoxLayout(g)
-        f.addWidget(QLabel("顺序：1 TL 左前 → 2 TR 右前 → 3 BR 右后 → 4 BL 左后 → 5 C 中心\n"
-                           "“前”= 人站在板上面朝的方向（TL/TR 传感器一侧）。\n"
-                           "左键添加，右键撤销。多台相机可分别点选（会三角化，更准）。"))
+        f.addWidget(QLabel("Order: 1 TL front-left → 2 TR front-right →\n"
+                           "3 BR back-right → 4 BL back-left → 5 C center.\n"
+                           '"Front" = the direction the subject faces on the\n'
+                           "board (the TL/TR sensor side).\n"
+                           "Left-click adds, right-click undoes. Clicking in several\n"
+                           "cameras triangulates the board (more accurate)."))
         h = QHBoxLayout()
-        self.b_click = QPushButton("开始点选")
+        self.b_click = QPushButton("Start Clicking")
         self.b_click.setCheckable(True)
         self.b_click.toggled.connect(self._toggle_click_mode)
         h.addWidget(self.b_click)
-        b = QPushButton("撤销")
+        b = QPushButton("Undo")
         b.clicked.connect(self.undo_click)
         h.addWidget(b)
-        b = QPushButton("清除本相机")
+        b = QPushButton("Clear This Camera")
         b.clicked.connect(lambda: (self.clicks.pop(self.current_cam(), None), self._update_click_hint()))
         h.addWidget(b)
         f.addLayout(h)
         self.click_hint = QLabel("")
         self.click_hint.setStyleSheet("color: #c60; font-weight: bold")
         f.addWidget(self.click_hint)
-        b = QPushButton("计算平衡板位置")
+        b = QPushButton("Compute Board Pose")
         b.clicked.connect(self.compute_board)
         f.addWidget(b)
         h = QHBoxLayout()
         for deg in (90, 180, -90):
-            b = QPushButton(f"坐标系旋转 {deg}°")
+            b = QPushButton(f"Rotate Frame {deg}°")
             b.clicked.connect(lambda _=False, d=deg: self.rotate_board(d))
             h.addWidget(b)
         f.addLayout(h)
         v.addWidget(g)
         self.board_info = QPlainTextEdit()
         self.board_info.setReadOnly(True)
-        self.board_info.setPlainText("验证方法：站到板的某一角，画面中 COP 点应出现在同一角；\n"
-                                     "若方向不对，使用“坐标系旋转”修正或重新点选。")
+        self.board_info.setPlainText("To verify: stand on one corner of the board; the COP dot\n"
+                                     "in the image should appear at the same corner. If the\n"
+                                     'direction is wrong, use "Rotate Frame" or redo the clicks.')
         v.addWidget(self.board_info, 1)
         return w
 
     def _tab_record(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
-        g = QGroupBox("3D 姿态估计")
+        g = QGroupBox("3D Pose Estimation")
         f = QGridLayout(g)
         self.pose_backend = QComboBox()
         self.pose_backend.addItems(["MediaPipe (full)", "MediaPipe (lite)", "MediaPipe (heavy)",
-                                    "插件 (.py)"])
+                                    "Plugin (.py)"])
         self.plugin_path = QLineEdit()
-        self.plugin_path.setPlaceholderText("插件文件，例如 plugins/poseassess_plugin.py")
+        self.plugin_path.setPlaceholderText("Plugin file, e.g. plugins/poseassess_plugin.py")
         b_pick = QPushButton("…")
         b_pick.clicked.connect(self._pick_plugin)
-        self.b_pose = QPushButton("启动姿态估计")
+        self.b_pose = QPushButton("Start Pose Estimation")
         self.b_pose.setCheckable(True)
         self.b_pose.toggled.connect(self.toggle_pose)
-        self.pose_label = QLabel("未启动")
+        self.pose_label = QLabel("Not running")
         f.addWidget(self.pose_backend, 0, 0, 1, 3)
         f.addWidget(self.plugin_path, 1, 0, 1, 2)
         f.addWidget(b_pick, 1, 2)
@@ -360,20 +368,20 @@ class MainWindow(QMainWindow):
         f.addWidget(self.pose_label, 3, 0, 1, 3)
         v.addWidget(g)
 
-        g = QGroupBox("录制")
+        g = QGroupBox("Recording")
         f = QFormLayout(g)
         self.subject = QLineEdit()
         self.notes = QLineEdit()
         self.out_dir = QLineEdit(str(self.recorder.root))
-        f.addRow("受试者", self.subject)
-        f.addRow("备注", self.notes)
+        f.addRow("Subject", self.subject)
+        f.addRow("Notes", self.notes)
         h = QHBoxLayout()
         h.addWidget(self.out_dir)
         b = QPushButton("…")
         b.clicked.connect(self._pick_outdir)
         h.addWidget(b)
-        f.addRow("保存目录", h)
-        self.b_rec = QPushButton("● 开始录制")
+        f.addRow("Output folder", h)
+        self.b_rec = QPushButton("● Start Recording")
         self.b_rec.setCheckable(True)
         self.b_rec.setStyleSheet("QPushButton:checked { background: #d33; color: white }")
         self.b_rec.toggled.connect(self.toggle_record)
@@ -410,7 +418,7 @@ class MainWindow(QMainWindow):
 
     # ============================================================ devices
     def _pick_video(self):
-        p, _ = QFileDialog.getOpenFileName(self, "选择视频", "", "Video (*.mp4 *.avi *.mov *.mkv)")
+        p, _ = QFileDialog.getOpenFileName(self, "Select Video", "", "Video (*.mp4 *.avi *.mov *.mkv)")
         if p:
             self.cam_source.setText(p)
 
@@ -452,7 +460,7 @@ class MainWindow(QMainWindow):
         h, w = frame.image.shape[:2]
         if c is None or tuple(c.image_size) != (w, h):
             if c is not None:
-                log.warning("%s 分辨率与标定不一致，使用近似内参", name)
+                log.warning("%s: resolution does not match calibration, using approximate intrinsics", name)
             c = approximate_calibration(name, w, h)
             self.calibs[name] = c
         return c
@@ -462,12 +470,13 @@ class MainWindow(QMainWindow):
         try:
             devs = BalanceBoardHID.list_devices()
         except Exception as e:  # noqa: BLE001
-            self._warn(f"无法枚举 HID 设备：{e}\n请安装 hidapi（pip install hidapi）")
+            self._warn(f"Cannot enumerate HID devices: {e}\nPlease install hidapi (pip install hidapi).")
             return
         for d in devs:
             self.wii_devices.addItem(f"{d.get('product_string') or 'Balance Board'}  {d['path']!r}", d["path"])
         if not devs:
-            self.status.showMessage("未找到 Wii Balance Board，请先蓝牙配对（按电池仓里的红色 SYNC 键）", 8000)
+            self.status.showMessage("No Wii Balance Board found. Pair it via Bluetooth first "
+                                    "(press the red SYNC button in the battery compartment).", 8000)
 
     def _set_force(self, src: ForceSource):
         self.disconnect_wii()
@@ -494,7 +503,7 @@ class MainWindow(QMainWindow):
             return
         try:
             t = self.force.do_tare(1.0)
-            self.status.showMessage(f"去皮完成：{np.round(t, 2)} kg", 5000)
+            self.status.showMessage(f"Tare done: {np.round(t, 2)} kg", 5000)
         except Exception as e:  # noqa: BLE001
             self._warn(str(e))
 
@@ -508,15 +517,15 @@ class MainWindow(QMainWindow):
         if col is None or col.spec != self.checker_spec():
             col = self.collectors[name] = IntrinsicCollector(self.checker_spec())
         if col.add(f.image) is None:
-            self.status.showMessage("未检测到棋盘格", 3000)
+            self.status.showMessage("Checkerboard not detected", 3000)
         else:
-            self.status.showMessage(f"{name}: 已采集 {len(col)} 张", 3000)
+            self.status.showMessage(f"{name}: {len(col)} frames captured", 3000)
 
     def compute_intrinsic(self):
         name = self.current_cam()
         col = self.collectors.get(name)
         if not col:
-            self._warn("请先采集棋盘格图像")
+            self._warn("Capture checkerboard images first")
             return
         try:
             c = col.calibrate(name)
@@ -532,7 +541,7 @@ class MainWindow(QMainWindow):
             c = self._ensure_calib(name, f)
             try:
                 err = extrinsics_from_checkerboard(c, f.image, spec)
-                msgs.append(f"{name}: 重投影误差 {err:.2f}px, 相机位置 {np.round(c.center_world, 3)} m")
+                msgs.append(f"{name}: reprojection error {err:.2f}px, camera position {np.round(c.center_world, 3)} m")
             except Exception as e:  # noqa: BLE001
                 msgs.append(f"{name}: {e}")
         self.status.showMessage("; ".join(msgs), 10000)
@@ -542,37 +551,37 @@ class MainWindow(QMainWindow):
         lines = []
         for n, c in self.calibs.items():
             lines.append(f"[{n}] {c.image_size[0]}x{c.image_size[1]}  "
-                         f"内参 RMS={c.intrinsic_rms if c.intrinsic_rms is not None else '未标定(近似)'}")
+                         f"intrinsic RMS={c.intrinsic_rms if c.intrinsic_rms is not None else 'uncalibrated (approx.)'}")
             lines.append(f"  fx={c.K[0, 0]:.1f} fy={c.K[1, 1]:.1f} cx={c.K[0, 2]:.1f} cy={c.K[1, 2]:.1f}")
             if c.has_extrinsics:
-                lines.append(f"  外参误差={c.extrinsic_rms if c.extrinsic_rms is None else round(c.extrinsic_rms, 3)}px"
-                             f"  相机位置(m)={np.round(c.center_world, 3)}")
+                lines.append(f"  extrinsic error={c.extrinsic_rms if c.extrinsic_rms is None else round(c.extrinsic_rms, 3)}px"
+                             f"  camera position (m)={np.round(c.center_world, 3)}")
             else:
-                lines.append("  外参：未设置")
+                lines.append("  extrinsics: not set")
         for n, col in self.collectors.items():
-            lines.append(f"{n}: 已采集 {len(col)} 张棋盘格")
+            lines.append(f"{n}: {len(col)} checkerboard frames captured")
         self.calib_info.setPlainText("\n".join(lines))
 
     def load_calib(self):
-        p, _ = QFileDialog.getOpenFileName(self, "导入相机标定", "", "Calibration (*.json *.toml)")
+        p, _ = QFileDialog.getOpenFileName(self, "Import Camera Calibration", "", "Calibration (*.json *.toml)")
         if not p:
             return
         cams = load_calibrations(p)
         names = list(self.streams)
         for i, c in enumerate(cams):
-            # 名称对不上时按顺序对应到已添加的相机
+            # If the names don't match, map to the added cameras in order
             if c.name not in self.streams and i < len(names):
                 c.name = names[i]
             self.calibs[c.name] = c
         self._refresh_calib_info()
 
     def save_calib(self):
-        p, _ = QFileDialog.getSaveFileName(self, "导出相机标定", "calibration.json", "JSON (*.json)")
+        p, _ = QFileDialog.getSaveFileName(self, "Export Camera Calibration", "calibration.json", "JSON (*.json)")
         if p:
             save_calibrations(p, list(self.calibs.values()))
 
     def export_toml(self):
-        p, _ = QFileDialog.getSaveFileName(self, "导出 Pose2Sim 标定", "Calib.toml", "TOML (*.toml)")
+        p, _ = QFileDialog.getSaveFileName(self, "Export Pose2Sim Calibration", "Calib.toml", "TOML (*.toml)")
         if p:
             save_pose2sim_toml(p, list(self.calibs.values()))
 
@@ -588,7 +597,7 @@ class MainWindow(QMainWindow):
     def _toggle_click_mode(self, on: bool):
         self.click_mode = on
         self.video.crosshair = on
-        self.b_click.setText("结束点选" if on else "开始点选")
+        self.b_click.setText("Stop Clicking" if on else "Start Clicking")
         self._update_click_hint()
 
     def _next_click_hint(self, name: str | None) -> str | None:
@@ -596,8 +605,8 @@ class MainWindow(QMainWindow):
             return None
         n = len(self.clicks.get(name, []))
         if n >= 5:
-            return "5 个点已完成，可点击“计算平衡板位置”"
-        return f"请点击 {n + 1}/5：{CLICK_HINTS[LANDMARK_NAMES[n]]}"
+            return 'All 5 points done - click "Compute Board Pose"'
+        return f"Click {n + 1}/5: {CLICK_HINTS[LANDMARK_NAMES[n]]}"
 
     def _update_click_hint(self):
         self.click_hint.setText(self._next_click_hint(self.current_cam()) or "")
@@ -624,14 +633,14 @@ class MainWindow(QMainWindow):
         frames = self._latest_frames()
         names = [n for n, p in self.clicks.items() if len(p) == 5]
         if not names:
-            self._warn("请至少在一台相机中点完 5 个点")
+            self._warn("Click all 5 points in at least one camera")
             return
         cams = []
         for n in names:
             if n in frames:
                 self._ensure_calib(n, frames[n])
             if n not in self.calibs:
-                self._warn(f"{n} 没有标定信息")
+                self._warn(f"{n} has no calibration")
                 return
             cams.append(self.calibs[n])
         try:
@@ -652,29 +661,30 @@ class MainWindow(QMainWindow):
         if b is None:
             return
         T = b.board_to_world
-        lines = [f"方法：{'多相机三角化' if b.method == 'triangulation' else '单相机 PnP'}",
-                 "重投影误差(px)：" + ", ".join(f"{k}={v:.2f}" for k, v in b.reproj_error_px.items()),
-                 f"板中心（世界, m）：{np.round(T.t, 4)}",
-                 f"板法向（世界）：{np.round(b.up_world, 3)}"]
+        lines = [f"Method: {'multi-camera triangulation' if b.method == 'triangulation' else 'single-camera PnP'}",
+                 "Reprojection error (px): " + ", ".join(f"{k}={v:.2f}" for k, v in b.reproj_error_px.items()),
+                 f"Board center (world, m): {np.round(T.t, 4)}",
+                 f"Board normal (world): {np.round(b.up_world, 3)}"]
         cams_wo_ext = [n for n in self.clicks if n in self.calibs and not self.calibs[n].has_extrinsics]
         if cams_wo_ext:
-            lines.append("注意：相机未设置外参，世界坐标系 = 相机坐标系。")
-        lines.append("\n验证：站到板的某一角，画面中 COP 点应出现在同一角。")
+            lines.append("Note: camera extrinsics not set; world frame = camera frame.")
+        lines.append("\nVerify: stand on one corner of the board; the COP dot in the image "
+                     "should appear at the same corner.")
         self.board_info.setPlainText("\n".join(lines))
 
     # =============================================================== pose
     def _pick_plugin(self):
-        p, _ = QFileDialog.getOpenFileName(self, "选择姿态插件", "plugins", "Python (*.py)")
+        p, _ = QFileDialog.getOpenFileName(self, "Select Pose Plugin", "plugins", "Python (*.py)")
         if p:
             self.plugin_path.setText(p)
-            self.pose_backend.setCurrentText("插件 (.py)")
+            self.pose_backend.setCurrentText("Plugin (.py)")
 
     def toggle_pose(self, on: bool):
         if not on:
             if self.pose_worker:
                 self.pose_worker.stop()
             self.pose_worker = None
-            self.b_pose.setText("启动姿态估计")
+            self.b_pose.setText("Start Pose Estimation")
             return
         backend = self.pose_backend.currentText()
         QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -690,25 +700,25 @@ class MainWindow(QMainWindow):
         except Exception as e:  # noqa: BLE001
             QApplication.restoreOverrideCursor()
             self.b_pose.setChecked(False)
-            self._warn(f"无法启动姿态估计：{e}")
+            self._warn(f"Cannot start pose estimation: {e}")
             return
         QApplication.restoreOverrideCursor()
         for n, f in self._latest_frames().items():
             self._ensure_calib(n, f)
         self.pose_worker = PoseWorker(est, self._latest_frames, self._cams_snapshot, self.recorder)
         self.pose_worker.start()
-        self.b_pose.setText("停止姿态估计")
+        self.b_pose.setText("Stop Pose Estimation")
 
     # ============================================================= record
     def _pick_outdir(self):
-        p = QFileDialog.getExistingDirectory(self, "保存目录", self.out_dir.text())
+        p = QFileDialog.getExistingDirectory(self, "Output Folder", self.out_dir.text())
         if p:
             self.out_dir.setText(p)
 
     def toggle_record(self, on: bool):
         if on:
             if not self.streams and not self.force:
-                self._warn("没有可录制的设备")
+                self._warn("No devices to record from")
                 self.b_rec.setChecked(False)
                 return
             for n, f in self._latest_frames().items():
@@ -722,22 +732,22 @@ class MainWindow(QMainWindow):
                     subject=self.subject.text().strip(), notes=self.notes.text())
             except Exception as e:  # noqa: BLE001
                 self.b_rec.setChecked(False)
-                self._warn(f"无法开始录制：{e}")
+                self._warn(f"Cannot start recording: {e}")
                 return
             self._rec_started = time.perf_counter()
-            self.b_rec.setText("■ 停止录制")
-            self.status.showMessage(f"录制到 {folder}")
+            self.b_rec.setText("■ Stop Recording")
+            self.status.showMessage(f"Recording to {folder}")
         else:
             folder = self.recorder.stop()
-            self.b_rec.setText("● 开始录制")
+            self.b_rec.setText("● Start Recording")
             if folder:
                 s = folder / "summary.json"
                 text = s.read_text(encoding="utf-8") if s.exists() else ""
-                self.summary.setPlainText(f"已保存：{folder}\n\n{text}")
+                self.summary.setPlainText(f"Saved: {folder}\n\n{text}")
 
     # ============================================================ project
     def save_project(self):
-        p, _ = QFileDialog.getSaveFileName(self, "保存配置", "poseboard_project.json", "JSON (*.json)")
+        p, _ = QFileDialog.getSaveFileName(self, "Save Project", "poseboard_project.json", "JSON (*.json)")
         if not p:
             return
         data = {
@@ -753,7 +763,7 @@ class MainWindow(QMainWindow):
 
     def load_project(self, path: str | None = None):
         if not isinstance(path, str):
-            path, _ = QFileDialog.getOpenFileName(self, "加载配置", "", "JSON (*.json)")
+            path, _ = QFileDialog.getOpenFileName(self, "Load Project", "", "JSON (*.json)")
         if not path:
             return
         data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -805,18 +815,18 @@ class MainWindow(QMainWindow):
         elif not self.streams:
             self.video.set_image(None)
 
-        # Wii 状态与俯视图
+        # Wii status and top-down view
         if self.force is not None:
             if self.force.error:
-                self.wii_label.setText(f"错误：{self.force.error}")
+                self.wii_label.setText(f"Error: {self.force.error}")
             elif force is not None:
                 k = force.kg
                 cop = force.cop_board
                 bat = getattr(self.force, "battery", None)
                 self.wii_label.setText(
                     f"TL {k[2]:6.2f}   TR {k[0]:6.2f}\nBL {k[3]:6.2f}   BR {k[1]:6.2f} kg\n"
-                    f"总重 {force.total_kg:6.2f} kg\nCOP x={cop[0] * 1000:7.1f} y={cop[1] * 1000:7.1f} mm"
-                    + (f"\n电量 {bat}" if bat is not None else ""))
+                    f"Total {force.total_kg:6.2f} kg\nCOP x={cop[0] * 1000:7.1f} y={cop[1] * 1000:7.1f} mm"
+                    + (f"\nBattery {bat}" if bat is not None else ""))
             trail = self.force.recent(5.0)
             cop_trail = [s.cop_board for s in trail]
             now = time.perf_counter()
@@ -831,14 +841,14 @@ class MainWindow(QMainWindow):
         if self.pose_worker:
             txt = f"{self.pose_worker.fps:.1f} fps"
             if self.pose_worker.error:
-                txt += f"  错误：{self.pose_worker.error}"
+                txt += f"  Error: {self.pose_worker.error}"
             if pose is None:
-                txt += "  （未检测到人）"
+                txt += "  (no person detected)"
             self.pose_label.setText(txt)
 
         if self.recorder.recording:
-            self.rec_label.setText(f"录制中 {time.perf_counter() - self._rec_started:6.1f}s   "
-                                   f"Wii {self.recorder.counts['wii']}  姿态 {self.recorder.counts['pose']}")
+            self.rec_label.setText(f"Recording {time.perf_counter() - self._rec_started:6.1f}s   "
+                                   f"Wii {self.recorder.counts['wii']}  Pose {self.recorder.counts['pose']}")
         cams_fps = "  ".join(f"{n}:{s.measured_fps:.0f}fps" for n, s in self.streams.items())
         if cams_fps and not self.status.currentMessage():
             self.status.showMessage(cams_fps, 1000)

@@ -14,6 +14,12 @@ How to use
 As shipped, this template loads and runs but detects nothing (``process`` returns None), so
 PoseBoard simply shows "(no person detected)". That makes it safe to test the wiring first.
 
+Dependencies: the plugin runs inside PoseBoard's own Python interpreter. ``POSEASSESS_DIR``
+only makes PoseAssess's source code importable; its third-party packages (torch, onnxruntime,
+mmpose, ...) must be installed in PoseBoard's environment too, with ``pip install --no-deps``
+followed by the missing packages so that only ONE OpenCV package is installed (see the README,
+"Option A"). The packaged PoseBoard.exe cannot load extra packages: use the source install.
+
 What PoseBoard gives you (every call to ``process``)
 ----------------------------------------------------
 ``frames``: ``{camera name: (t, bgr_image)}``
@@ -46,9 +52,11 @@ Keypoint names and the center of mass
 -------------------------------------
 PoseBoard computes the whole-body center of mass (COM) from the keypoints
 (``poseboard/pose/com.py``). It matches names such as ``LShoulder``/``left_shoulder``
-automatically and needs at least both shoulders and both hips; knees, ankles, elbows,
-wrists, ears/nose and heels/toes make it more accurate. Pick the keypoint set below that
-matches the ORDER of your model's output, or define your own list.
+automatically. It needs the trunk (both shoulders and both hips) plus enough other segments
+to reach 60% of the body mass: shoulders and hips alone are not enough; add both knees, or the
+head (ears or nose) plus one knee or both elbows. Ankles, wrists and heels/toes make it more
+accurate. Pick the keypoint set below that matches the ORDER of your model's output, or define
+your own list.
 """
 
 from __future__ import annotations
@@ -61,7 +69,7 @@ import numpy as np
 
 from poseboard.calibration import CameraCalibration
 from poseboard.pose.base import Pose2D, Pose3D, PoseEstimator
-from poseboard.pose.mediapipe_backend import single_view_lift
+from poseboard.pose.mediapipe_backend import single_view_lift, world_view
 from poseboard.pose.triangulation import triangulate_keypoints
 
 log = logging.getLogger(__name__)
@@ -247,7 +255,6 @@ class PoseAssessEstimator(PoseEstimator):
                 dets[cam_name] = d
         if not dets:
             return None
-        t = float(np.mean([frames[n][0] for n in dets]))
 
         per2d: dict[str, Pose2D] = {}
         for cam_name, d in dets.items():
@@ -255,17 +262,27 @@ class PoseAssessEstimator(PoseEstimator):
                 kp2d = self._check(d["kp2d"], (K, 2), f"2D keypoints of {cam_name}")
                 per2d[cam_name] = Pose2D(kp2d, self._scores(d.get("scores"), K))
 
-        # Two or more calibrated views -> weighted DLT triangulation.
-        calibrated = [n for n in per2d if n in cams and cams[n].has_extrinsics]
-        if len(calibrated) >= 2:
-            kps, conf = triangulate_keypoints([cams[n] for n in calibrated],
-                                              [per2d[n].keypoints for n in calibrated],
-                                              [per2d[n].scores for n in calibrated],
-                                              self.min_score)
-            return Pose3D(t, list(names), kps, conf, per2d)
+        # Never mix frames: with extrinsics (world = floor checkerboard) only calibrated views are
+        # used; without extrinsics only PoseBoard's world camera (whose frame is the world frame).
+        cam_name = world_view(cams, self.world_camera)
+        if cam_name is None:
+            calibrated = [n for n in per2d if n in cams and cams[n].has_extrinsics]
+            if len(calibrated) >= 2:  # two or more calibrated views -> weighted triangulation
+                t = float(np.mean([frames[n][0] for n in calibrated]))
+                kps, conf = triangulate_keypoints([cams[n] for n in calibrated],
+                                                  [per2d[n].keypoints for n in calibrated],
+                                                  [per2d[n].scores for n in calibrated],
+                                                  self.min_score)
+                return Pose3D(t, list(names), kps, conf, per2d)
+            calibrated = [n for n in dets if n in cams and cams[n].has_extrinsics]
+            if not calibrated:
+                return None  # only cameras without extrinsics see the person
+            cam_name = calibrated[0]
+        if cam_name not in dets:
+            return None
+        t = float(frames[cam_name][0])
 
         # Single view -> needs metric 3D from your model.
-        cam_name = calibrated[0] if calibrated else next(iter(dets))
         d, cam = dets[cam_name], cams.get(cam_name)
         if d.get("kp3d") is None or cam is None:
             self._warn_once("single-view",

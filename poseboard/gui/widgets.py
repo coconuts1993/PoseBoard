@@ -33,6 +33,7 @@ class VideoView(QWidget):
     def set_image(self, img: np.ndarray | None) -> None:
         if img is None:
             self._img = None
+            self._size = (0, 0)  # no image: clicks are ignored (not mapped to an old image)
         else:
             self._img = bgr_to_qimage(img)
             self._size = (img.shape[1], img.shape[0])
@@ -120,7 +121,8 @@ class CopView(QWidget):
             p.setBrush(QColor(150, 150, 150))
             p.drawEllipse(pt(x, y), 5, 5)
             p.drawText(pt(x, y) + QPointF(-8, -9 if y > 0 else 20), name)
-        p.drawText(QPointF(8, 14), "Front (TL/TR side) ↑")
+        p.drawText(QPointF(8, 14), "Front ↑ = TL/TR edge (opposite the power button)")
+        p.drawText(pt(0, -bh / 2) + QPointF(-40, 14), "power button")
 
         for trail, color in ((self.com_trail, QColor(255, 140, 0)), (self.cop_trail, QColor(30, 100, 220))):
             ok = trail[np.all(np.isfinite(trail), axis=1)]

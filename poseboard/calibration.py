@@ -14,11 +14,14 @@ Conventions
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -119,6 +122,12 @@ class CheckerboardSpec:
     def pattern_size(self) -> tuple[int, int]:
         return (self.cols, self.rows)
 
+    @property
+    def unambiguous(self) -> bool:
+        """True if cols + rows is odd, so the world-frame origin is well defined (see
+        ``canonical_corners``)."""
+        return (self.cols + self.rows) % 2 == 1
+
     def object_points(self) -> np.ndarray:
         """3D coordinates (meters) of the inner corners in the checkerboard frame."""
         grid = np.zeros((self.rows * self.cols, 3), np.float64)
@@ -127,16 +136,23 @@ class CheckerboardSpec:
 
 
 def find_checkerboard(image: np.ndarray, spec: CheckerboardSpec,
-                      fast: bool = False) -> np.ndarray | None:
-    """Detect checkerboard inner corners (N,2). fast=True is for live preview
-    (returns quickly when no board is found)."""
+                      fast: bool = False, max_width: int | None = None) -> np.ndarray | None:
+    """Detect checkerboard inner corners (N,2). fast=True is for live preview (returns quickly
+    when no board is found). With ``max_width`` a larger image is searched at that width and
+    the corners are scaled back (much faster; for preview, not for calibration)."""
     gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    search, scale = gray, 1.0
+    if max_width and gray.shape[1] > max_width:
+        scale = max_width / gray.shape[1]
+        search = cv2.resize(gray, (max_width, max(1, round(gray.shape[0] * scale))),
+                            interpolation=cv2.INTER_AREA)
     flags = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE
     if fast:
         flags |= cv2.CALIB_CB_FAST_CHECK
-    found, corners = cv2.findChessboardCorners(gray, spec.pattern_size, flags)
+    found, corners = cv2.findChessboardCorners(search, spec.pattern_size, flags)
     if not found:
         return None
+    corners = (corners / scale).astype(np.float32)  # sub-pixel refinement at full resolution
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-3)
     corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
     return corners.reshape(-1, 2)
@@ -166,7 +182,10 @@ class IntrinsicCollector:
         obj = self.spec.object_points().astype(np.float32)
         objpoints = [obj] * len(self.corners)
         imgpoints = [c.astype(np.float32).reshape(-1, 1, 2) for c in self.corners]
-        rms, K, dist, _, _ = cv2.calibrateCamera(objpoints, imgpoints, self.image_size, None, None)
+        # k3 is fixed to 0: Pose2Sim's Calib.toml stores only 4 distortion coefficients, so a
+        # calibration with k3 could not be exported faithfully (Pose2Sim calibrates the same way).
+        rms, K, dist, _, _ = cv2.calibrateCamera(objpoints, imgpoints, self.image_size, None, None,
+                                                 flags=cv2.CALIB_FIX_K3)
         return CameraCalibration(name=name, image_size=self.image_size, K=K,
                                  dist=dist.ravel(), intrinsic_rms=float(rms))
 
@@ -181,7 +200,7 @@ def canonical_corners(image: np.ndarray, corners: np.ndarray, spec: Checkerboard
         Z is up when the board lies flat on the floor);
     (2) the square diagonally outward from the origin is black.
     Requires a board whose inner-corner "cols + rows" is odd (e.g. 9x6); otherwise
-    the 180° symmetry cannot be resolved.
+    the 180° symmetry cannot be resolved (see ``check_world_checkerboard``).
     """
     gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     gray = gray.astype(np.float32)
@@ -213,6 +232,20 @@ def canonical_corners(image: np.ndarray, corners: np.ndarray, spec: Checkerboard
     return np.asarray(corners).reshape(-1, 2) if best is None else best
 
 
+def check_world_checkerboard(spec: CheckerboardSpec, n_cameras: int) -> str | None:
+    """Check a checkerboard used to define the world frame. A symmetric board (cols + rows
+    even) lets different cameras pick origins 180° apart: refused (ValueError) for two or more
+    cameras; for a single camera a warning text is returned (its world frame is still usable)."""
+    if spec.unambiguous:
+        return None
+    msg = (f"A {spec.cols} x {spec.rows} checkerboard is symmetric (cols + rows is even), so the "
+           "origin of the world frame is ambiguous. Use a board with one odd and one even "
+           "inner-corner count, e.g. 9 x 6.")
+    if n_cameras >= 2:
+        raise ValueError(msg + " With several cameras the world frames would not match.")
+    return msg
+
+
 def extrinsics_from_checkerboard(cam: CameraCalibration, image: np.ndarray,
                                  spec: CheckerboardSpec) -> float:
     """Detect the checkerboard and use it as the world frame; writes cam.rvec/cam.tvec.
@@ -226,6 +259,8 @@ def extrinsics_from_checkerboard(cam: CameraCalibration, image: np.ndarray,
     corners = find_checkerboard(image, spec)
     if corners is None:
         raise RuntimeError("Checkerboard not detected")
+    if not spec.unambiguous:
+        log.warning(check_world_checkerboard(spec, 1))
     corners = canonical_corners(image, corners, spec, cam)
     return extrinsics_from_points(cam, spec.object_points(), corners)
 
@@ -274,33 +309,53 @@ def load_pose2sim_toml(path: str | Path) -> list[CameraCalibration]:
         dist = np.zeros(5)
         src = np.asarray(d.get("distortions", [0, 0, 0, 0]), np.float64)
         dist[: len(src)] = src
+        rvec = np.asarray(d["rotation"], np.float64) if "rotation" in d else None
+        tvec = np.asarray(d["translation"], np.float64) if "translation" in d else None
+        if rvec is not None and tvec is not None and not np.any(rvec) and not np.any(tvec):
+            rvec = tvec = None  # all zeros: a placeholder, not a camera pose
         cams.append(CameraCalibration(
             name=d.get("name", key),
             image_size=tuple(int(v) for v in d.get("size", [0, 0])),
             K=np.asarray(d["matrix"], np.float64),
             dist=dist,
-            rvec=np.asarray(d["rotation"], np.float64) if "rotation" in d else None,
-            tvec=np.asarray(d["translation"], np.float64) if "translation" in d else None,
+            rvec=rvec,
+            tvec=tvec,
         ))
     return cams
 
 
-def save_pose2sim_toml(path: str | Path, cams: list[CameraCalibration]) -> None:
+def save_pose2sim_toml(path: str | Path, cams: list[CameraCalibration]) -> list[str]:
+    """Write a Pose2Sim Calib.toml. Cameras without extrinsics are skipped (Pose2Sim needs a
+    camera pose for every camera). Returns warnings (skipped cameras, dropped k3); raises
+    ValueError if no camera has extrinsics."""
     def arr(a):
         return "[ " + ", ".join(repr(float(x)) for x in np.ravel(a)) + ",]"
 
+    warnings = []
+    skipped = [c.name for c in cams if not c.has_extrinsics]
+    cams = [c for c in cams if c.has_extrinsics]
+    if skipped:
+        warnings.append(f"Not exported (no extrinsics): {', '.join(skipped)}")
+    if not cams:
+        raise ValueError("No camera has extrinsics; set them from the checkerboard first")
     lines = []
     for i, c in enumerate(cams, 1):
+        dist = np.ravel(c.dist)
+        if len(dist) > 4 and np.any(np.abs(dist[4:]) > 1e-6):
+            warnings.append(f"{c.name}: distortion coefficients beyond k1, k2, p1, p2 (k3 = "
+                            f"{dist[4]:.3g}) cannot be stored in Calib.toml and were dropped; "
+                            "recalibrate the intrinsics (PoseBoard now fixes k3 = 0)")
         lines += [
             f"[cam_{i:02d}]",
             f'name = "{c.name}"',
             f"size = [ {float(c.image_size[0])}, {float(c.image_size[1])},]",
             "matrix = [ " + ", ".join(arr(r) for r in np.asarray(c.K)) + ",]",
-            f"distortions = {arr(np.ravel(c.dist)[:4])}",
-            f"rotation = {arr(c.rvec if c.rvec is not None else np.zeros(3))}",
-            f"translation = {arr(c.tvec if c.tvec is not None else np.zeros(3))}",
+            f"distortions = {arr(dist[:4])}",
+            f"rotation = {arr(c.rvec)}",
+            f"translation = {arr(c.tvec)}",
             "fisheye = false",
             "",
         ]
     lines += ["[metadata]", "adjusted = false", "error = 0.0", ""]
     Path(path).write_text("\n".join(lines), encoding="utf-8")
+    return warnings

@@ -52,9 +52,17 @@ def test_record_and_analyze(tmp_path):
 
     meta = json.loads((folder / "session.json").read_text(encoding="utf-8"))
     assert meta["samples"]["wii"] > 20 and meta["samples"]["pose"] == 15
-    assert (folder / "cam0.mp4").stat().st_size > 0
+    video = folder / meta["streams"][0]["video"]
+    assert video.name == "cam0.mkv" and video.stat().st_size > 0
+    cap = cv2.VideoCapture(str(video))
+    n_frames = 0
+    while cap.read()[0]:
+        n_frames += 1
+    cap.release()
     ts = read_csv_columns(folder / "cam0_timestamps.csv")
     assert len(ts["t"]) > 5
+    assert n_frames == len(ts["t"])  # one timestamp row per stored frame
+    np.testing.assert_allclose(ts["t_rel"], ts["t"] - meta["t0"], atol=2e-6)
 
     summary = json.loads((folder / "summary.json").read_text(encoding="utf-8"))
     assert 60 < summary["mean_total_kg"] < 80

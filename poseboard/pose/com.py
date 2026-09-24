@@ -3,14 +3,25 @@
 Segment mass fractions and COM locations follow Winter (2009) *Biomechanics and Motor
 Control of Human Movement*, Table 4.1. Keypoint names are matched after normalization,
 so common naming schemes such as MediaPipe (left_hip) and OpenPose/Halpe/Pose2Sim
-(LHip, LBigToe) are supported.
+(LHip, LBigToe) are supported, as are Human3.6M / BVH skeletons whose ankle joint is called
+"LFoot" / "LeftFoot" (used as the ankle when there is no ankle keypoint).
+
+Minimum keypoints: the trunk (both shoulders and both hips) plus enough other segments to
+reach 60% of the body mass. Shoulders and hips alone are only 49.7%; in practice add both
+knees, or the head (ears or nose) plus one knee or both elbows. Every further segment (knees,
+ankles, elbows, wrists, head, heels/toes) makes the COM more accurate. Missing segments are
+logged once per combination.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 
 import numpy as np
+
+log = logging.getLogger(__name__)
+MIN_MASS_FRACTION = 0.6
 
 # (mass fraction, proximal point, distal point, COM position as a fraction from proximal)
 # Proximal/distal are "part" names resolved by _locate() (l/r prefix = left/right)
@@ -37,9 +48,14 @@ _PART_ALIASES = {
     "knee": ["knee"],
     "ankle": ["ankle", "ank"],
     "heel": ["heel"],
-    "toe": ["footindex", "bigtoe", "toe", "foot"],
+    "toe": ["footindex", "bigtoe", "toebase", "toe"],
     "ear": ["ear"],
 }
+# Tried only when none of the aliases above exists: Human3.6M (VideoPose3D, MotionBERT) and
+# BVH/Mixamo skeletons call the ankle joint "LFoot" / "LeftFoot".
+_FALLBACK_ALIASES = {"ankle": ["foot"]}
+_LEG_SEGMENTS = ("l_thigh", "r_thigh", "l_shank", "r_shank")
+_reported: set = set()
 
 
 def _norm(name: str) -> str:
@@ -55,11 +71,12 @@ class KeypointIndex:
 
     def find(self, side: str | None, part: str) -> int | None:
         prefixes = [""] if side is None else (["left", "l"] if side == "l" else ["right", "r"])
-        for alias in _PART_ALIASES.get(part, [part]):
-            for p in prefixes:
-                i = self._idx.get(p + alias)
-                if i is not None:
-                    return i
+        for aliases in (_PART_ALIASES.get(part, [part]), _FALLBACK_ALIASES.get(part, [])):
+            for alias in aliases:
+                for p in prefixes:
+                    i = self._idx.get(p + alias)
+                    if i is not None:
+                        return i
         return None
 
 
@@ -94,12 +111,19 @@ def _point(kp: np.ndarray, idx: KeypointIndex, token: str) -> np.ndarray | None:
     return p
 
 
+def _report_once(key, msg: str) -> None:
+    if key not in _reported and len(_reported) < 50:
+        _reported.add(key)
+        log.warning(msg)
+
+
 def center_of_mass(keypoints: np.ndarray, names: list[str],
                    return_segments: bool = False):
     """Estimate the whole-body COM from 3D keypoints. Missing segments are handled by
     renormalizing over the mass of the remaining segments.
 
-    At least the trunk (both shoulders + both hips) is required; otherwise returns None.
+    Returns None unless the trunk (both shoulders + both hips) is found and the segments found
+    add up to at least 60% of the body mass (see the module docstring).
     """
     idx = KeypointIndex(names)
     kp = np.asarray(keypoints, np.float64)
@@ -113,7 +137,16 @@ def center_of_mass(keypoints: np.ndarray, names: list[str],
         segs[seg] = c
         acc += m * c
         total_m += m
-    if "trunk" not in segs or total_m < 0.6:
+    missing = tuple(seg for seg, *_ in SEGMENTS if seg not in segs)
+    if "trunk" not in segs or total_m < MIN_MASS_FRACTION:
+        why = ("no trunk (both shoulders and both hips are needed)" if "trunk" not in segs else
+               f"the segments found are only {total_m:.0%} of the body mass (60% needed)")
+        _report_once(("none", missing), f"No COM: {why}; missing segments: {', '.join(missing)}")
         return (None, segs) if return_segments else None
+    legs = [s for s in _LEG_SEGMENTS if s in missing]
+    if legs:
+        _report_once(("legs", missing), "COM computed without " + ", ".join(legs) + " (keypoints "
+                     "missing or not recognized); it may be biased. Missing segments: "
+                     + ", ".join(missing))
     com = acc / total_m
     return (com, segs) if return_segments else com

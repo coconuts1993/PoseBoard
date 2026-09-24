@@ -7,11 +7,14 @@
   board in the same coordinate frame.
 * Multiple cameras (>= 2 with calibrated extrinsics): detect 2D keypoints in each camera,
   then triangulate with confidence weights for higher accuracy.
+* Frames are never mixed: if any camera has extrinsics, only cameras with extrinsics are used;
+  without extrinsics only ``world_camera`` (the camera whose frame is the world frame).
 """
 
 from __future__ import annotations
 
 import logging
+import shutil
 import urllib.request
 from pathlib import Path
 
@@ -54,14 +57,33 @@ MODEL_URLS = {
 MODEL_DIR = Path(__file__).resolve().parents[2] / "models"
 
 
-def ensure_model(variant: str = "full") -> Path:
-    MODEL_DIR.mkdir(exist_ok=True)
-    path = MODEL_DIR / f"pose_landmarker_{variant}.task"
-    if not path.exists():
-        log.info("downloading %s", MODEL_URLS[variant])
-        tmp = path.with_suffix(".part")
-        urllib.request.urlretrieve(MODEL_URLS[variant], tmp)
-        tmp.rename(path)
+def model_path(variant: str = "full") -> Path:
+    return MODEL_DIR / f"pose_landmarker_{variant}.task"
+
+
+def ensure_model(variant: str = "full", timeout: float = 30.0) -> Path:
+    """Path of the model file, downloading it first if needed (``timeout`` seconds without data
+    aborts the download). The error message names the URL and where to put the file."""
+    path = model_path(variant)
+    if path.exists():
+        return path
+    url = MODEL_URLS[variant]
+    tmp = path.with_suffix(".part")
+    log.info("downloading %s", url)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(url, timeout=timeout) as r, open(tmp, "wb") as f:
+            shutil.copyfileobj(r, f, 1 << 16)
+        tmp.replace(path)
+    except Exception as e:  # noqa: BLE001
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"Cannot download the MediaPipe model ({e}).\nDownload it on any computer from\n"
+            f"  {url}\nand save it as\n  {path}\n(or copy that file from the packaged PoseBoard "
+            "build or another PC).") from e
     return path
 
 
@@ -116,31 +138,43 @@ class MediaPipePose(PoseEstimator):
                 dets[name] = d
         if not dets:
             return None
-        t_mean = float(np.mean([frames[n][0] for n in dets]))
         per2d = {n: d[0] for n, d in dets.items()}
 
-        calibrated = [n for n in dets if n in cams and cams[n].has_extrinsics]
-        if len(calibrated) >= 2:
-            kps, conf = triangulate_keypoints([cams[n] for n in calibrated],
-                                              [dets[n][0].keypoints for n in calibrated],
-                                              [dets[n][0].scores for n in calibrated],
-                                              self.min_score)
-            return Pose3D(t_mean, list(MP_NAMES), kps, conf, per2d)
-
-        name = calibrated[0] if calibrated else next(iter(dets))
-        cam = cams.get(name)
-        if cam is None:
+        name = world_view(cams, self.world_camera)
+        if name is None:  # world = checkerboard: only cameras with extrinsics
+            calibrated = [n for n in dets if n in cams and cams[n].has_extrinsics]
+            if len(calibrated) >= 2:
+                t_mean = float(np.mean([frames[n][0] for n in calibrated]))
+                kps, conf = triangulate_keypoints([cams[n] for n in calibrated],
+                                                  [dets[n][0].keypoints for n in calibrated],
+                                                  [dets[n][0].scores for n in calibrated],
+                                                  self.min_score)
+                return Pose3D(t_mean, list(MP_NAMES), kps, conf, per2d)
+            if not calibrated:
+                return None  # only cameras without extrinsics see the person: other frame
+            name = calibrated[0]
+        if name not in dets:
             return None
         pose2d, world = dets[name]
-        kps = single_view_lift(cam, pose2d, world, self.min_score)
+        kps = single_view_lift(cams[name], pose2d, world, self.min_score)
         if kps is None:
             return None
-        return Pose3D(t_mean, list(MP_NAMES), kps, pose2d.scores.copy(), per2d)
+        return Pose3D(float(frames[name][0]), list(MP_NAMES), kps, pose2d.scores.copy(), per2d)
 
     def close(self):
         for lm in self._landmarkers.values():
             lm.close()
         self._landmarkers.clear()
+
+
+def world_view(cams: dict[str, CameraCalibration], world_camera: str | None = None) -> str | None:
+    """None if the world frame is the checkerboard (some camera has extrinsics); otherwise the
+    camera whose frame is the world frame: ``world_camera`` if given, else the first camera."""
+    if any(c.has_extrinsics for c in cams.values()):
+        return None
+    if world_camera in cams:
+        return world_camera
+    return next(iter(cams), None)
 
 
 def single_view_lift(cam: CameraCalibration, pose2d: Pose2D, body_pts: np.ndarray,

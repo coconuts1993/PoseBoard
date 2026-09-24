@@ -32,6 +32,7 @@ dev = ["pytest>=7.4"]
 [project.scripts]
 poseboard = "poseboard.gui.app:main"
 poseboard-analysis = "poseboard.analysis:main"
+poseboard-wii = "poseboard.wii.record:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "poseboard.__version__" }

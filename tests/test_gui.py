@@ -1,5 +1,8 @@
 """Offscreen end-to-end GUI flow: camera (video file) → checkerboard extrinsics →
-click the balance board → simulated Wii → record."""
+click the balance board → simulated Wii → record (with an event marker).
+
+Set POSEBOARD_SCREENSHOT=<file.png> to save screenshots: the Record tab while recording, and
+the Devices tab (<file>_devices.png) at the end."""
 
 import json
 import os
@@ -12,6 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 
 from poseboard.geometry import BoardGeometry  # noqa: E402
+from poseboard.wii.device import BalanceBoardHID  # noqa: E402
 from tests.synthetic import BOARD_T, SPEC, scene_camera, write_scene_video  # noqa: E402
 
 
@@ -27,12 +31,16 @@ def pump(app, seconds):
         time.sleep(0.01)
 
 
-def test_full_flow(app, tmp_path):
+def test_full_flow(app, tmp_path, monkeypatch):
     from poseboard.gui.app import MainWindow
 
+    # Auto-connect starts with the window; make sure no real board on this machine interferes
+    monkeypatch.setattr(BalanceBoardHID, "list_devices", staticmethod(lambda: []))
+    shot = os.environ.get("POSEBOARD_SCREENSHOT")
     video = tmp_path / "scene.mp4"
     write_scene_video(video)
     w = MainWindow()
+    assert w.chk_auto.isChecked()
     w.resize(1400, 850)
     w.show()
     w.cam_res.setCurrentText("Default")
@@ -66,20 +74,32 @@ def test_full_flow(app, tmp_path):
 
     # Simulated Wii + recording
     w.connect_sim()
+    assert not w.chk_auto.isChecked()
     w.out_dir.setText(str(tmp_path / "rec"))
     w.subject.setText("test")
     pump(app, 0.3)
+    w.tabs.setCurrentIndex(3)
     w.b_rec.setChecked(True)
-    pump(app, 1.0)
-    w.grab().save(str(tmp_path / "screenshot.png"))
+    pump(app, 0.5)
+    w.event_label.setText("sync")
+    w.mark_event()
+    pump(app, 0.5)
+    w.grab().save(shot or str(tmp_path / "screenshot.png"))
     w.b_rec.setChecked(False)
+    # Post-processing runs in the background: the window stays responsive meanwhile
+    assert "Post-processing" in w.summary.toPlainText()
+    assert w.recorder.wait_post_processing(30)
+    pump(app, 0.1)
+    assert '"cop"' in w.summary.toPlainText()
     folders = list((tmp_path / "rec").iterdir())
     assert len(folders) == 1
     meta = json.loads((folders[0] / "session.json").read_text(encoding="utf-8"))
     assert meta["board_pose"]["method"] == "pnp"
     assert meta["samples"]["wii"] > 50
+    assert meta["has_wii"] and meta["has_video"] and meta["t0_unix"] > 1e9
     summary = json.loads((folders[0] / "summary.json").read_text(encoding="utf-8"))
     assert summary["cop"]["samples"] > 50
+    assert summary["events_marked"] == 1
 
     # Save/load config
     proj = tmp_path / "proj.json"
@@ -89,6 +109,9 @@ def test_full_flow(app, tmp_path):
     w.board = None
     w.load_project(str(proj))
     np.testing.assert_allclose(w.board.board_to_world.t, BOARD_T.t, atol=0.02)
-    if os.environ.get("POSEBOARD_SCREENSHOT"):
-        w.grab().save(os.environ["POSEBOARD_SCREENSHOT"])
+    if shot:
+        w.tabs.setCurrentIndex(0)
+        pump(app, 0.2)
+        stem, ext = os.path.splitext(shot)
+        w.grab().save(f"{stem}_devices{ext or '.png'}")
     w.close()
